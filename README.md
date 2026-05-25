@@ -75,11 +75,12 @@ See [docs/setup.md](docs/setup.md) for Chatwork Webhook and token details.
 - `fetchThread()` using room metadata.
 - Stable thread ID encode/decode.
 - Basic HTTP error mapping.
+- Outbound Markdown to Chatwork notation ([info], [code], [hr], links, lists, tables).
+- Inbound Chatwork notation preprocessing into Markdown AST.
 
 ## Not supported yet
 
 - OAuth2 token flow.
-- Rich Chatwork notation to Markdown AST conversion.
 - Modals and ephemeral messages.
 - Typing indicators.
 - Reactions.
@@ -107,6 +108,8 @@ When a thread ID includes a message ID, `postMessage()` tries to fetch the origi
 - Events from the bot account are ignored when `botAccountId` is configured.
 - Outbound bodies over 65,535 characters throw `ValidationError`.
 - Outbound files over 5MB throw `ValidationError`.
+- Outbound bold, italic, and strikethrough markers are stripped because Chatwork has no equivalent syntax.
+- Heading-only lines are sent as plain text; headings with body content use `[info][title]`.
 
 ## Subscribed threads and webhooks
 

@@ -7,7 +7,6 @@ import {
   ConsoleLogger,
   Message,
   NotImplementedError,
-  parseMarkdown,
   type Adapter,
   type AdapterPostableMessage,
   type ChatInstance,
@@ -223,7 +222,7 @@ export class ChatworkAdapter
       author: this.buildAuthor({
         accountId,
       }),
-      formatted: parseMarkdown(event.body),
+      formatted: this.converter.toAst(event.body),
       id: event.message_id,
       isMention: this.isMentionPayload(raw),
       metadata: {
@@ -318,7 +317,7 @@ export class ChatworkAdapter
     }
 
     const decoded = this.decodeThreadId(threadId);
-    const body = this.converter.renderPostable(message);
+    const body = await this.renderOutgoingBody(decoded, message);
     validateBodyLength(body);
 
     const raw = await this.client.editRoomMessage({
@@ -646,7 +645,7 @@ export class ChatworkAdapter
         userId: String(raw.account.account_id),
         userName: raw.account.name,
       },
-      formatted: parseMarkdown(raw.body),
+      formatted: this.converter.toAst(raw.body),
       id: raw.message_id,
       isMention: Boolean(
         this.botAccountId && hasToNotation(raw.body, this.botAccountId)

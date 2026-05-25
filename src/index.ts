@@ -5,7 +5,11 @@ export {
 export { ChatworkAdapter } from "./adapter";
 export { ChatworkClient } from "./client";
 export { createChatworkAdapter } from "./factory";
-export { ChatworkFormatConverter } from "./format-converter";
+export {
+  ChatworkFormatConverter,
+  preprocessChatworkToMarkdown,
+  preserveMarkdownLineBreaks,
+} from "./format-converter";
 export {
   hasToNotation,
   parseReplyNotation,
