@@ -124,6 +124,16 @@ describe("ChatworkClient", () => {
     ]);
   });
 
+  it("returns an empty array when contacts respond with 204", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const client = new ChatworkClient({
+      apiToken: "token",
+      fetch: fetchMock,
+    });
+
+    await expect(client.getContacts()).resolves.toEqual([]);
+  });
+
   it("uploads room files with multipart form data", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ file_id: 42 }), { status: 200 })

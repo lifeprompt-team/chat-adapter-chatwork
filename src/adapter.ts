@@ -32,6 +32,7 @@ import type {
   ChatworkMessageCreatedEvent,
   ChatworkMentionToMeEvent,
   ChatworkPostMessageResponse,
+  ChatworkRoomMember,
   ChatworkRoomMessage,
   ChatworkThreadId,
   ChatworkWebhookPayload,
@@ -44,6 +45,7 @@ import {
 const MAX_BODY_LENGTH = 65535;
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const CONTACTS_CACHE_TTL_MS = 60_000;
+const ROOM_MEMBERS_CACHE_TTL_MS = 60_000;
 
 export class ChatworkAdapter
   implements Adapter<ChatworkThreadId, unknown>
@@ -55,6 +57,10 @@ export class ChatworkAdapter
   private chat: ChatInstance | null = null;
   private contactsCache: ChatworkContact[] | null = null;
   private contactsCacheExpiresAt = 0;
+  private readonly roomMembersCacheById = new Map<
+    number,
+    { expiresAt: number; members: ChatworkRoomMember[] }
+  >();
   private readonly client: ChatworkClient;
   private readonly config: ChatworkAdapterConfig;
   private logger: Logger;
@@ -432,6 +438,7 @@ export class ChatworkAdapter
     const author = await this.resolveAuthor({
       accountId: Number(message.author.userId),
       fallbackName: message.author.userName,
+      roomId: decoded.roomId,
     });
 
     return new Message<T>({
@@ -450,6 +457,7 @@ export class ChatworkAdapter
   private async resolveAuthor(args: {
     accountId: number;
     fallbackName?: string;
+    roomId: number;
   }): Promise<Message<unknown>["author"]> {
     if (!Number.isInteger(args.accountId)) {
       return {
@@ -462,7 +470,20 @@ export class ChatworkAdapter
     }
 
     const user = await this.getUser(String(args.accountId));
-    const displayName = user?.fullName ?? args.fallbackName ?? String(args.accountId);
+    if (user) {
+      return {
+        fullName: user.fullName,
+        isBot: false,
+        isMe: this.botAccountId === args.accountId,
+        userId: String(args.accountId),
+        userName: user.userName,
+      };
+    }
+
+    const members = await this.getRoomMembersCached({ roomId: args.roomId });
+    const member = members.find((entry) => entry.account_id === args.accountId);
+    const displayName =
+      member?.name ?? args.fallbackName ?? String(args.accountId);
 
     return {
       fullName: displayName,
@@ -488,9 +509,25 @@ export class ChatworkAdapter
       return this.contactsCache;
     }
 
-    this.contactsCache = await this.client.getContacts();
+    this.contactsCache = (await this.client.getContacts()) ?? [];
     this.contactsCacheExpiresAt = Date.now() + CONTACTS_CACHE_TTL_MS;
     return this.contactsCache;
+  }
+
+  private async getRoomMembersCached(args: {
+    roomId: number;
+  }): Promise<ChatworkRoomMember[]> {
+    const cached = this.roomMembersCacheById.get(args.roomId);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.members;
+    }
+
+    const members = (await this.client.getRoomMembers(args.roomId)) ?? [];
+    this.roomMembersCacheById.set(args.roomId, {
+      expiresAt: Date.now() + ROOM_MEMBERS_CACHE_TTL_MS,
+      members,
+    });
+    return members;
   }
 
   private async isDirectRoom(roomId: number): Promise<boolean> {

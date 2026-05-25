@@ -26,7 +26,7 @@ export class ChatworkClient {
   }
 
   async getContacts(): Promise<ChatworkContact[]> {
-    return this.requestJson<ChatworkContact[]>("/contacts");
+    return this.requestJson<ChatworkContact[]>("/contacts", undefined, true);
   }
 
   async getRoom(roomId: number): Promise<ChatworkRoom> {

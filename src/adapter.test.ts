@@ -293,6 +293,68 @@ describe("ChatworkAdapter", () => {
     );
   });
 
+  it("returns null from getUser when contacts respond with 204", async () => {
+    const fetch = createFetchMock({
+      "/contacts": () => new Response(null, { status: 204 }),
+    });
+    const adapter = createAdapter({ fetch });
+
+    await expect(adapter.getUser("123")).resolves.toBeNull();
+  });
+
+  it("resolves group room authors from room members when not in contacts", async () => {
+    const processMessage = vi.fn();
+    const fetch = createFetchMock({
+      "/contacts": () => new Response(null, { status: 204 }),
+      "/rooms/456/members": () =>
+        new Response(
+          JSON.stringify([
+            { account_id: 123, name: "Bob", role: "member" },
+            { account_id: 999, name: "Bot", role: "admin" },
+          ]),
+          { status: 200 }
+        ),
+      "/rooms/456": () =>
+        new Response(
+          JSON.stringify({ name: "Group", room_id: 456, type: "group" }),
+          { status: 200 }
+        ),
+    });
+    const adapter = createAdapter({ fetch });
+    await adapter.initialize(createChat(processMessage));
+
+    const body = JSON.stringify({
+      webhook_event: {
+        account_id: 123,
+        body: "[rp aid=999 to=456-m1]\nanswer",
+        message_id: "m2",
+        room_id: 456,
+        send_time: 1498028125,
+        update_time: 0,
+      },
+      webhook_event_time: 1498028130,
+      webhook_event_type: "message_created",
+      webhook_setting_id: "setting-1",
+    });
+
+    const response = await adapter.handleWebhook(
+      new Request("https://example.com/webhook", {
+        body,
+        headers: {
+          "x-chatworkwebhooksignature": createChatworkSignature(
+            body,
+            Buffer.from("webhook-secret").toString("base64")
+          ),
+        },
+        method: "POST",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(processMessage).toHaveBeenCalledTimes(1);
+    expect(processMessage.mock.calls[0]?.[2]?.author.fullName).toBe("Bob");
+  });
+
   it("uploads files through postMessage", async () => {
     const fetch = createFetchMock({
       "/rooms/456/files/42": () =>
