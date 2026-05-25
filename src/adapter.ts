@@ -1,5 +1,6 @@
 import {
   extractFiles,
+  ResourceNotFoundError,
   ValidationError,
 } from "@chat-adapter/shared";
 import {
@@ -17,14 +18,17 @@ import {
   type Logger,
   type RawMessage,
   type ThreadInfo,
+  type UserInfo,
   type WebhookOptions,
 } from "chat";
+import { resolveInboundAttachments } from "./attachments";
 import { ChatworkClient } from "./client";
 import { ChatworkFormatConverter } from "./format-converter";
-import { hasToNotation, renderReplyNotation } from "./notation";
+import { hasToNotation, parseReplyNotation, renderReplyNotation } from "./notation";
 import { decodeThreadId, encodeThreadId } from "./thread-id";
 import type {
   ChatworkAdapterConfig,
+  ChatworkContact,
   ChatworkMessageCreatedEvent,
   ChatworkMentionToMeEvent,
   ChatworkPostMessageResponse,
@@ -38,6 +42,8 @@ import {
 } from "./webhook";
 
 const MAX_BODY_LENGTH = 65535;
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const CONTACTS_CACHE_TTL_MS = 60_000;
 
 export class ChatworkAdapter
   implements Adapter<ChatworkThreadId, unknown>
@@ -47,10 +53,13 @@ export class ChatworkAdapter
 
   private botAccountId?: number;
   private chat: ChatInstance | null = null;
+  private contactsCache: ChatworkContact[] | null = null;
+  private contactsCacheExpiresAt = 0;
   private readonly client: ChatworkClient;
   private readonly config: ChatworkAdapterConfig;
   private logger: Logger;
   private readonly converter = new ChatworkFormatConverter();
+  private readonly roomTypeById = new Map<number, string>();
 
   constructor(config: ChatworkAdapterConfig) {
     validateConfig(config);
@@ -58,7 +67,14 @@ export class ChatworkAdapter
     this.botAccountId = config.botAccountId;
     this.userName = config.userName ?? "chatwork-bot";
     this.logger = config.logger ?? new ConsoleLogger();
-    this.client = new ChatworkClient({ apiToken: config.apiToken });
+    this.client = new ChatworkClient({
+      apiToken: config.apiToken,
+      fetch: config.fetch,
+    });
+  }
+
+  get botUserId(): string | undefined {
+    return this.botAccountId ? String(this.botAccountId) : undefined;
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
@@ -81,6 +97,64 @@ export class ChatworkAdapter
 
   channelIdFromThreadId(threadId: string): string {
     return String(this.decodeThreadId(threadId).roomId);
+  }
+
+  isDM(threadId: string): boolean {
+    const decoded = this.decodeThreadId(threadId);
+    const cachedType = this.roomTypeById.get(decoded.roomId);
+    return cachedType === "direct";
+  }
+
+  async openDM(userId: string): Promise<string> {
+    const accountId = Number(userId);
+    if (!Number.isInteger(accountId)) {
+      throw new ValidationError("chatwork", `Invalid Chatwork account ID: ${userId}`);
+    }
+
+    const contacts = await this.getContactsCached();
+    const contact = contacts.find((entry) => entry.account_id === accountId);
+    if (!contact?.room_id) {
+      throw new ResourceNotFoundError(
+        "chatwork",
+        "Chatwork direct room",
+        userId
+      );
+    }
+
+    this.roomTypeById.set(contact.room_id, "direct");
+    return encodeThreadId({ roomId: contact.room_id });
+  }
+
+  async getUser(userId: string): Promise<UserInfo | null> {
+    const accountId = Number(userId);
+    if (!Number.isInteger(accountId)) {
+      return null;
+    }
+
+    const contacts = await this.getContactsCached();
+    const contact = contacts.find((entry) => entry.account_id === accountId);
+    if (!contact) {
+      return null;
+    }
+
+    return {
+      avatarUrl: contact.avatar_image_url,
+      fullName: contact.name,
+      isBot: false,
+      userId: String(accountId),
+      userName: contact.name,
+    };
+  }
+
+  async onThreadSubscribe(threadId: string): Promise<void> {
+    const decoded = this.decodeThreadId(threadId);
+    this.logger.info(
+      "Chatwork thread subscribed. Ensure room webhook (message_created) is configured for subscribed follow-ups.",
+      {
+        roomId: decoded.roomId,
+        threadId,
+      }
+    );
   }
 
   async handleWebhook(
@@ -113,11 +187,13 @@ export class ChatworkAdapter
       return new Response("OK", { status: 200 });
     }
 
-    if (!this.shouldProcessPayload(payload)) {
+    if (!(await this.shouldProcessPayload(payload))) {
       return new Response("OK", { status: 200 });
     }
 
-    const message = this.parseMessage(payload);
+    const message = await this.enrichInboundMessage(
+      this.parseMessage(payload)
+    );
     this.requireChat().processMessage(this, message.threadId, message, options);
 
     return new Response("OK", { status: 200 });
@@ -138,13 +214,9 @@ export class ChatworkAdapter
 
     return new Message<unknown>({
       attachments: [],
-      author: {
-        fullName: String(accountId),
-        isBot: "unknown",
-        isMe: false,
-        userId: String(accountId),
-        userName: String(accountId),
-      },
+      author: this.buildAuthor({
+        accountId,
+      }),
       formatted: parseMarkdown(event.body),
       id: event.message_id,
       isMention: this.isMentionPayload(raw),
@@ -167,28 +239,60 @@ export class ChatworkAdapter
     message: AdapterPostableMessage
   ): Promise<RawMessage<ChatworkPostMessageResponse>> {
     const files = extractFiles(message);
-    if (files.length > 0) {
-      throw new ValidationError(
-        "chatwork",
-        "Chatwork file uploads are not supported yet"
-      );
-    }
-
     const decoded = this.decodeThreadId(threadId);
     const text = await this.renderOutgoingBody(decoded, message);
-    validateBodyLength(text);
 
-    const raw = await this.client.postRoomMessage({
-      body: text,
-      roomId: decoded.roomId,
-      selfUnread: this.config.selfUnread,
-    });
+    if (files.length === 0) {
+      validateBodyLength(text);
+      const raw = await this.client.postRoomMessage({
+        body: text,
+        roomId: decoded.roomId,
+        selfUnread: this.config.selfUnread,
+      });
+
+      return {
+        id: raw.message_id,
+        raw,
+        threadId: this.encodeThreadId({
+          messageId: raw.message_id,
+          roomId: decoded.roomId,
+        }),
+      };
+    }
+
+    let lastMessageId: string | undefined;
+
+    for (const [index, file] of files.entries()) {
+      validateUploadSize({ file });
+      const uploadMessage = index === 0 && text.length > 0 ? text : undefined;
+      if (uploadMessage) {
+        validateBodyLength(uploadMessage);
+      }
+
+      const upload = await this.client.uploadRoomFile({
+        file: toUploadBlob({ file }),
+        filename: file.filename,
+        message: uploadMessage,
+        mimeType: file.mimeType,
+        roomId: decoded.roomId,
+      });
+
+      const fileInfo = await this.client.getRoomFile({
+        fileId: upload.file_id,
+        roomId: decoded.roomId,
+      });
+      lastMessageId = fileInfo.message_id;
+    }
+
+    if (!lastMessageId) {
+      throw new ValidationError("chatwork", "Chatwork file upload did not return a message ID");
+    }
 
     return {
-      id: raw.message_id,
-      raw,
+      id: lastMessageId,
+      raw: { message_id: lastMessageId },
       threadId: this.encodeThreadId({
-        messageId: raw.message_id,
+        messageId: lastMessageId,
         roomId: decoded.roomId,
       }),
     };
@@ -199,6 +303,14 @@ export class ChatworkAdapter
     messageId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage<ChatworkPostMessageResponse>> {
+    const files = extractFiles(message);
+    if (files.length > 0) {
+      throw new ValidationError(
+        "chatwork",
+        "Chatwork does not support editing messages with file uploads"
+      );
+    }
+
     const decoded = this.decodeThreadId(threadId);
     const body = this.converter.renderPostable(message);
     validateBodyLength(body);
@@ -234,7 +346,9 @@ export class ChatworkAdapter
       roomId: decoded.roomId,
     });
 
-    return this.messageFromRoomMessage(raw, decoded.roomId);
+    return this.enrichInboundMessage(
+      this.messageFromRoomMessage(raw, decoded.roomId)
+    );
   }
 
   async fetchMessages(
@@ -245,8 +359,12 @@ export class ChatworkAdapter
     const messages = await this.client.getRoomMessages(decoded.roomId);
 
     return {
-      messages: messages.map((message) =>
-        this.messageFromRoomMessage(message, decoded.roomId)
+      messages: await Promise.all(
+        messages.map(async (message) =>
+          this.enrichInboundMessage(
+            this.messageFromRoomMessage(message, decoded.roomId)
+          )
+        )
       ),
     };
   }
@@ -254,6 +372,9 @@ export class ChatworkAdapter
   async fetchThread(threadId: string): Promise<ThreadInfo> {
     const decoded = this.decodeThreadId(threadId);
     const room = await this.client.getRoom(decoded.roomId);
+    if (room.type) {
+      this.roomTypeById.set(decoded.roomId, room.type);
+    }
 
     return {
       channelId: String(decoded.roomId),
@@ -297,6 +418,92 @@ export class ChatworkAdapter
       "Chatwork reactions are not supported",
       "removeReaction"
     );
+  }
+
+  private async enrichInboundMessage<T>(
+    message: Message<T>
+  ): Promise<Message<T>> {
+    const decoded = this.decodeThreadId(message.threadId);
+    const attachments = await resolveInboundAttachments({
+      body: message.text,
+      client: this.client,
+      roomId: decoded.roomId,
+    });
+    const author = await this.resolveAuthor({
+      accountId: Number(message.author.userId),
+      fallbackName: message.author.userName,
+    });
+
+    return new Message<T>({
+      attachments,
+      author,
+      formatted: message.formatted,
+      id: message.id,
+      isMention: message.isMention,
+      metadata: message.metadata,
+      raw: message.raw,
+      text: message.text,
+      threadId: message.threadId,
+    });
+  }
+
+  private async resolveAuthor(args: {
+    accountId: number;
+    fallbackName?: string;
+  }): Promise<Message<unknown>["author"]> {
+    if (!Number.isInteger(args.accountId)) {
+      return {
+        fullName: args.fallbackName ?? "unknown",
+        isBot: "unknown",
+        isMe: false,
+        userId: String(args.accountId),
+        userName: args.fallbackName ?? "unknown",
+      };
+    }
+
+    const user = await this.getUser(String(args.accountId));
+    const displayName = user?.fullName ?? args.fallbackName ?? String(args.accountId);
+
+    return {
+      fullName: displayName,
+      isBot: false,
+      isMe: this.botAccountId === args.accountId,
+      userId: String(args.accountId),
+      userName: displayName,
+    };
+  }
+
+  private buildAuthor(args: { accountId: number }): Message<unknown>["author"] {
+    return {
+      fullName: String(args.accountId),
+      isBot: "unknown",
+      isMe: this.botAccountId === args.accountId,
+      userId: String(args.accountId),
+      userName: String(args.accountId),
+    };
+  }
+
+  private async getContactsCached(): Promise<ChatworkContact[]> {
+    if (this.contactsCache && Date.now() < this.contactsCacheExpiresAt) {
+      return this.contactsCache;
+    }
+
+    this.contactsCache = await this.client.getContacts();
+    this.contactsCacheExpiresAt = Date.now() + CONTACTS_CACHE_TTL_MS;
+    return this.contactsCache;
+  }
+
+  private async isDirectRoom(roomId: number): Promise<boolean> {
+    const cachedType = this.roomTypeById.get(roomId);
+    if (cachedType) {
+      return cachedType === "direct";
+    }
+
+    const room = await this.client.getRoom(roomId);
+    if (room.type) {
+      this.roomTypeById.set(roomId, room.type);
+    }
+    return room.type === "direct";
   }
 
   private async renderOutgoingBody(
@@ -347,15 +554,31 @@ export class ChatworkAdapter
     }
   }
 
-  private shouldProcessPayload(payload: ChatworkWebhookPayload): boolean {
+  private async shouldProcessPayload(
+    payload: ChatworkWebhookPayload
+  ): Promise<boolean> {
     const accountId = getAuthorAccountId(payload);
     if (this.botAccountId && accountId === this.botAccountId) {
       return false;
     }
 
-    return payload.webhook_event_type === "mention_to_me"
-      ? true
-      : this.isMentionPayload(payload);
+    if (payload.webhook_event_type === "mention_to_me") {
+      return true;
+    }
+
+    if (this.isMentionPayload(payload)) {
+      return true;
+    }
+
+    if (parseReplyNotation(payload.webhook_event.body)) {
+      return true;
+    }
+
+    if (payload.webhook_event_type === "message_created") {
+      return this.isDirectRoom(payload.webhook_event.room_id);
+    }
+
+    return false;
   }
 
   private isMentionPayload(payload: ChatworkWebhookPayload): boolean {
@@ -439,6 +662,47 @@ function validateBodyLength(body: string): void {
       `Chatwork message body must be ${MAX_BODY_LENGTH} characters or fewer`
     );
   }
+}
+
+function validateUploadSize(args: { file: { data: Blob | Buffer | ArrayBuffer; filename: string } }): void {
+  const size = readUploadSize({ data: args.file.data });
+  if (size > MAX_UPLOAD_BYTES) {
+    throw new ValidationError(
+      "chatwork",
+      `Chatwork file uploads must be ${MAX_UPLOAD_BYTES} bytes or fewer`
+    );
+  }
+}
+
+function readUploadSize(args: { data: Blob | Buffer | ArrayBuffer }): number {
+  if (Buffer.isBuffer(args.data)) {
+    return args.data.byteLength;
+  }
+  if (args.data instanceof ArrayBuffer) {
+    return args.data.byteLength;
+  }
+  return args.data.size;
+}
+
+function toUploadBlob(args: {
+  file: { data: Blob | Buffer | ArrayBuffer; filename: string; mimeType?: string };
+}): Blob | Buffer {
+  if (args.file.data instanceof Buffer || args.file.data instanceof Blob) {
+    return args.file.data;
+  }
+  return new Blob([toBlobPart({ data: args.file.data })], {
+    type: args.file.mimeType ?? "application/octet-stream",
+  });
+}
+
+function toBlobPart(args: { data: Blob | Buffer | ArrayBuffer }): BlobPart {
+  if (args.data instanceof Blob) {
+    return args.data;
+  }
+  if (Buffer.isBuffer(args.data)) {
+    return Uint8Array.from(args.data);
+  }
+  return args.data;
 }
 
 function getAuthorAccountId(payload: ChatworkWebhookPayload): number {

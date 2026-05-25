@@ -31,6 +31,7 @@ export function createChatworkAdapter(
   return new ChatworkAdapter({
     apiToken,
     botAccountId,
+    fetch: config.fetch,
     logger: config.logger,
     selfUnread:
       config.selfUnread ?? parseBoolean(process.env.CHATWORK_SELF_UNREAD),
