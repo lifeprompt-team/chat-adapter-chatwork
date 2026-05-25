@@ -1,3 +1,7 @@
+export {
+  extractDownloadFileIds,
+  resolveInboundAttachments,
+} from "./attachments";
 export { ChatworkAdapter } from "./adapter";
 export { ChatworkClient } from "./client";
 export { createChatworkAdapter } from "./factory";
