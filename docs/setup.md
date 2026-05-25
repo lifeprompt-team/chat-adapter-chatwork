@@ -57,12 +57,39 @@ When a message ID is present, `postMessage()` tries to fetch the original messag
 [rp aid={accountId} to={roomId}-{messageId}]
 ```
 
+## Subscribed follow-ups
+
+For direct messages and pending-style replies, configure room webhooks with `message_created` on the relevant room IDs.
+
+The adapter forwards these `message_created` events to Chat SDK:
+
+- direct room messages
+- messages containing reply notation (`[rp aid=...]`)
+
+After `thread.subscribe()`, the adapter logs a reminder to configure the room webhook for that room ID.
+
+## Attachments
+
+Inbound file messages include Chatwork download notation in the message body:
+
+```text
+[download:1466244790]file.pdf (54 KB)
+```
+
+The adapter resolves these into Chat SDK `attachments` with short-lived download URLs.
+
+Outbound uploads use `POST /rooms/{room_id}/files` with a 5MB limit per file.
+
 ## Current feature scope
 
 Supported:
 
 - `mention_to_me` events.
 - Opt-in `message_created` events.
+- Direct room follow-up messages.
+- Reply notation parsing and rendering.
+- `openDM()` and `getUser()`.
+- Inbound and outbound file attachments.
 - Text posting.
 - Message edit/delete.
 - Message and room fetching.
@@ -70,7 +97,6 @@ Supported:
 Not supported yet:
 
 - OAuth2 token flow.
-- Files and attachments.
 - Full Chatwork notation conversion.
 - Modals and ephemeral messages.
 - Typing indicators.

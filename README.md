@@ -25,7 +25,7 @@ const chatwork = createChatworkAdapter({
 });
 
 const chat = new Chat({
-  adapters: [chatwork],
+  adapters: { chatwork },
 });
 ```
 
@@ -61,7 +61,12 @@ See [docs/setup.md](docs/setup.md) for Chatwork Webhook and token details.
 - Webhook signature verification.
 - `mention_to_me` events.
 - `message_created` events with opt-in room message processing.
+- Direct room follow-up messages for subscribed threads.
 - Reply notation for thread replies using `[rp aid=... to=roomId-messageId]`.
+- `openDM()` via `GET /contacts`.
+- `getUser()` via cached contacts.
+- Inbound file attachments parsed from `[download:fileId]` message bodies.
+- Outbound file uploads via `POST /rooms/{room_id}/files` (5MB limit).
 - `postMessage()`.
 - `editMessage()`.
 - `deleteMessage()`.
@@ -74,7 +79,6 @@ See [docs/setup.md](docs/setup.md) for Chatwork Webhook and token details.
 ## Not supported yet
 
 - OAuth2 token flow.
-- Files and attachments.
 - Rich Chatwork notation to Markdown AST conversion.
 - Modals and ephemeral messages.
 - Typing indicators.
@@ -97,9 +101,16 @@ When a thread ID includes a message ID, `postMessage()` tries to fetch the origi
 - `mention_to_me` events are treated as mentions.
 - `message_created` events are not treated as mentions by default.
 - `message_created` events containing `[To:{botAccountId}]` are treated as mentions.
+- `message_created` events in direct rooms are forwarded to Chat SDK for subscribed-thread follow-ups.
+- `message_created` events containing reply notation (`[rp aid=...]`) are forwarded for pending-style replies.
 - Set `treatRoomMessagesAsMentions: true` if your bot should process all room messages.
 - Events from the bot account are ignored when `botAccountId` is configured.
 - Outbound bodies over 65,535 characters throw `ValidationError`.
+- Outbound files over 5MB throw `ValidationError`.
+
+## Subscribed threads and webhooks
+
+Chat SDK uses `thread.subscribe()` for follow-up handling. For direct rooms and pending replies, configure Chatwork room webhooks with `message_created` on the relevant room IDs. The adapter logs a reminder from `onThreadSubscribe()`.
 
 ## Development
 
@@ -108,6 +119,12 @@ This package depends on Chat SDK primitives:
 - `chat` is a peer dependency.
 - `@chat-adapter/shared` provides shared adapter errors and helpers.
 - Chatwork-specific API and webhook behavior lives in this package.
+
+```sh
+pnpm install
+pnpm test
+pnpm build
+```
 
 ## License
 
