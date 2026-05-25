@@ -2,10 +2,14 @@ import { NetworkError } from "@chat-adapter/shared";
 import { mapChatworkResponseError } from "./errors";
 import type {
   ChatworkClientConfig,
+  ChatworkContact,
   ChatworkMe,
   ChatworkPostMessageResponse,
   ChatworkRoom,
+  ChatworkRoomFile,
+  ChatworkRoomMember,
   ChatworkRoomMessage,
+  ChatworkUploadFileResponse,
 } from "./types";
 
 const API_BASE_URL = "https://api.chatwork.com/v2";
@@ -21,8 +25,16 @@ export class ChatworkClient {
     return this.requestJson<ChatworkMe>("/me");
   }
 
+  async getContacts(): Promise<ChatworkContact[]> {
+    return this.requestJson<ChatworkContact[]>("/contacts");
+  }
+
   async getRoom(roomId: number): Promise<ChatworkRoom> {
     return this.requestJson<ChatworkRoom>(`/rooms/${roomId}`);
+  }
+
+  async getRoomMembers(roomId: number): Promise<ChatworkRoomMember[]> {
+    return this.requestJson<ChatworkRoomMember[]>(`/rooms/${roomId}/members`);
   }
 
   async postRoomMessage(options: {
@@ -95,6 +107,45 @@ export class ChatworkClient {
     );
   }
 
+  async getRoomFile(options: {
+    createDownloadUrl?: boolean;
+    fileId: number;
+    roomId: number;
+  }): Promise<ChatworkRoomFile> {
+    const query = options.createDownloadUrl ? "?create_download_url=1" : "";
+    return this.requestJson<ChatworkRoomFile>(
+      `/rooms/${options.roomId}/files/${options.fileId}${query}`
+    );
+  }
+
+  async uploadRoomFile(options: {
+    file: Blob | Buffer;
+    filename: string;
+    message?: string;
+    mimeType?: string;
+    roomId: number;
+  }): Promise<ChatworkUploadFileResponse> {
+    const form = new FormData();
+    const blob =
+      options.file instanceof Blob
+        ? options.file
+        : new Blob([toBlobPart({ data: options.file })], {
+            type: options.mimeType ?? "application/octet-stream",
+          });
+    form.append("file", blob, options.filename);
+    if (options.message) {
+      form.append("message", options.message);
+    }
+
+    return this.requestMultipart<ChatworkUploadFileResponse>(
+      `/rooms/${options.roomId}/files`,
+      {
+        body: form,
+        method: "POST",
+      }
+    );
+  }
+
   private async requestJson<T>(
     path: string,
     init: RequestInit = {},
@@ -119,19 +170,62 @@ export class ChatworkClient {
       );
     }
 
-    if (response.status === 204 && allowNoContent) {
+    return this.parseResponse<T>({ allowNoContent, path, response });
+  }
+
+  private async requestMultipart<T>(
+    path: string,
+    init: RequestInit
+  ): Promise<T> {
+    let response: Response;
+
+    try {
+      response = await this.fetchImpl(`${API_BASE_URL}${path}`, {
+        ...init,
+        headers: {
+          "x-chatworktoken": this.config.apiToken,
+          ...init.headers,
+        },
+      });
+    } catch (error) {
+      throw new NetworkError(
+        "chatwork",
+        "Failed to call Chatwork API",
+        error instanceof Error ? error : undefined
+      );
+    }
+
+    return this.parseResponse<T>({ path, response });
+  }
+
+  private async parseResponse<T>(args: {
+    allowNoContent?: boolean;
+    path: string;
+    response: Response;
+  }): Promise<T> {
+    if (args.response.status === 204 && args.allowNoContent) {
       return [] as T;
     }
 
-    if (!response.ok) {
-      throw await mapChatworkResponseError(response, path);
+    if (!args.response.ok) {
+      throw await mapChatworkResponseError(args.response, args.path);
     }
 
-    const text = await response.text();
+    const text = await args.response.text();
     if (!text) {
       return undefined as T;
     }
 
     return JSON.parse(text) as T;
   }
+}
+
+function toBlobPart(args: { data: Blob | Buffer | ArrayBuffer }): BlobPart {
+  if (args.data instanceof Blob) {
+    return args.data;
+  }
+  if (Buffer.isBuffer(args.data)) {
+    return Uint8Array.from(args.data);
+  }
+  return args.data;
 }

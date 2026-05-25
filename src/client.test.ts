@@ -96,4 +96,91 @@ describe("ChatworkClient", () => {
       client.postRoomMessage({ body: "hello", roomId: 123 })
     ).rejects.toBeInstanceOf(AuthenticationError);
   });
+
+  it("loads contacts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            account_id: 123,
+            name: "Alice",
+            room_id: 789,
+          },
+        ]),
+        { status: 200 }
+      )
+    );
+    const client = new ChatworkClient({
+      apiToken: "token",
+      fetch: fetchMock,
+    });
+
+    await expect(client.getContacts()).resolves.toEqual([
+      {
+        account_id: 123,
+        name: "Alice",
+        room_id: 789,
+      },
+    ]);
+  });
+
+  it("uploads room files with multipart form data", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ file_id: 42 }), { status: 200 })
+    );
+    const client = new ChatworkClient({
+      apiToken: "token",
+      fetch: fetchMock,
+    });
+
+    await client.uploadRoomFile({
+      file: Buffer.from("hello"),
+      filename: "hello.txt",
+      message: "attached",
+      roomId: 123,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.chatwork.com/v2/rooms/123/files",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "x-chatworktoken": "token",
+        }),
+      })
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBeInstanceOf(FormData);
+  });
+
+  it("loads room files with optional download URLs", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          account: { account_id: 123, name: "Alice" },
+          download_url: "https://example.com/file",
+          file_id: 42,
+          filename: "file.txt",
+          filesize: 10,
+          message_id: "m1",
+          upload_time: 1,
+        }),
+        { status: 200 }
+      )
+    );
+    const client = new ChatworkClient({
+      apiToken: "token",
+      fetch: fetchMock,
+    });
+
+    await expect(
+      client.getRoomFile({
+        createDownloadUrl: true,
+        fileId: 42,
+        roomId: 123,
+      })
+    ).resolves.toMatchObject({
+      download_url: "https://example.com/file",
+      file_id: 42,
+    });
+  });
 });
