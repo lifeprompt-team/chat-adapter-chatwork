@@ -84,7 +84,11 @@ describe("ChatworkAdapter", () => {
     expect(message.isMention).toBe(true);
     expect(message.author.userId).toBe("123");
     expect(message.threadId).toBe(
-      adapter.encodeThreadId({ messageId: "m1", roomId: 456 })
+      adapter.encodeThreadId({
+        messageId: "m1",
+        replyToAccountId: 123,
+        roomId: 456,
+      })
     );
   });
 

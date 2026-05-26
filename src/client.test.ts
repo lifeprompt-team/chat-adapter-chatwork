@@ -162,6 +162,63 @@ describe("ChatworkClient", () => {
     expect(fetchMock.mock.calls[0]?.[1]?.body).toBeInstanceOf(FormData);
   });
 
+  it("retries 429 responses after retryAfter seconds", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ errors: ["too many requests"] }), {
+          headers: {
+            "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 2),
+          },
+          status: 429,
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message_id: "m1" }), { status: 200 })
+      );
+    const client = new ChatworkClient({
+      apiToken: "token",
+      fetch: fetchMock,
+      maxRateLimitRetries: 2,
+      sleep,
+    });
+
+    await expect(
+      client.postRoomMessage({ body: "hello", roomId: 123 })
+    ).resolves.toEqual({ message_id: "m1" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(2000);
+  });
+
+  it("throws after exhausting rate limit retries", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ errors: ["too many requests"] }), {
+        headers: {
+          "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 1),
+        },
+        status: 429,
+      })
+    );
+    const client = new ChatworkClient({
+      apiToken: "token",
+      fetch: fetchMock,
+      maxRateLimitRetries: 1,
+      sleep,
+    });
+
+    await expect(
+      client.postRoomMessage({ body: "hello", roomId: 123 })
+    ).rejects.toMatchObject({
+      code: "RATE_LIMITED",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
   it("loads room files with optional download URLs", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

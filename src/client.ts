@@ -1,5 +1,5 @@
 import { NetworkError } from "@chat-adapter/shared";
-import { mapChatworkResponseError } from "./errors";
+import { isAdapterRateLimitError, mapChatworkResponseError } from "./errors";
 import type {
   ChatworkClientConfig,
   ChatworkContact,
@@ -13,12 +13,25 @@ import type {
 } from "./types";
 
 const API_BASE_URL = "https://api.chatwork.com/v2";
+const DEFAULT_MAX_RATE_LIMIT_RETRIES = 3;
+const DEFAULT_RATE_LIMIT_RETRY_SECONDS = 15;
+
+function defaultSleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
 
 export class ChatworkClient {
   private readonly fetchImpl: typeof fetch;
+  private readonly maxRateLimitRetries: number;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
 
   constructor(private readonly config: ChatworkClientConfig) {
     this.fetchImpl = config.fetch ?? fetch;
+    this.maxRateLimitRetries =
+      config.maxRateLimitRetries ?? DEFAULT_MAX_RATE_LIMIT_RETRIES;
+    this.sleep = config.sleep ?? defaultSleep;
   }
 
   async getMe(): Promise<ChatworkMe> {
@@ -151,51 +164,78 @@ export class ChatworkClient {
     init: RequestInit = {},
     allowNoContent = false
   ): Promise<T> {
-    let response: Response;
+    return this.requestWithRateLimitRetry(async () => {
+      let response: Response;
 
-    try {
-      response = await this.fetchImpl(`${API_BASE_URL}${path}`, {
-        ...init,
-        headers: {
-          "x-chatworktoken": this.config.apiToken,
-          ...(init.body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
-          ...init.headers,
-        },
-      });
-    } catch (error) {
-      throw new NetworkError(
-        "chatwork",
-        "Failed to call Chatwork API",
-        error instanceof Error ? error : undefined
-      );
-    }
+      try {
+        response = await this.fetchImpl(`${API_BASE_URL}${path}`, {
+          ...init,
+          headers: {
+            "x-chatworktoken": this.config.apiToken,
+            ...(init.body
+              ? { "Content-Type": "application/x-www-form-urlencoded" }
+              : {}),
+            ...init.headers,
+          },
+        });
+      } catch (error) {
+        throw new NetworkError(
+          "chatwork",
+          "Failed to call Chatwork API",
+          error instanceof Error ? error : undefined
+        );
+      }
 
-    return this.parseResponse<T>({ allowNoContent, path, response });
+      return this.parseResponse<T>({ allowNoContent, path, response });
+    });
   }
 
   private async requestMultipart<T>(
     path: string,
     init: RequestInit
   ): Promise<T> {
-    let response: Response;
+    return this.requestWithRateLimitRetry(async () => {
+      let response: Response;
 
-    try {
-      response = await this.fetchImpl(`${API_BASE_URL}${path}`, {
-        ...init,
-        headers: {
-          "x-chatworktoken": this.config.apiToken,
-          ...init.headers,
-        },
-      });
-    } catch (error) {
-      throw new NetworkError(
-        "chatwork",
-        "Failed to call Chatwork API",
-        error instanceof Error ? error : undefined
-      );
+      try {
+        response = await this.fetchImpl(`${API_BASE_URL}${path}`, {
+          ...init,
+          headers: {
+            "x-chatworktoken": this.config.apiToken,
+            ...init.headers,
+          },
+        });
+      } catch (error) {
+        throw new NetworkError(
+          "chatwork",
+          "Failed to call Chatwork API",
+          error instanceof Error ? error : undefined
+        );
+      }
+
+      return this.parseResponse<T>({ path, response });
+    });
+  }
+
+  private async requestWithRateLimitRetry<T>(
+    request: () => Promise<T>
+  ): Promise<T> {
+    let attempt = 0;
+
+    while (true) {
+      try {
+        return await request();
+      } catch (error) {
+        if (!isAdapterRateLimitError(error) || attempt >= this.maxRateLimitRetries) {
+          throw error;
+        }
+
+        attempt += 1;
+        const retryAfterSeconds =
+          error.retryAfter ?? DEFAULT_RATE_LIMIT_RETRY_SECONDS;
+        await this.sleep(retryAfterSeconds * 1000);
+      }
     }
-
-    return this.parseResponse<T>({ path, response });
   }
 
   private async parseResponse<T>(args: {

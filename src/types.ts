@@ -14,6 +14,8 @@ export interface ChatworkAdapterConfig {
 export interface ChatworkClientConfig {
   apiToken: string;
   fetch?: typeof fetch;
+  maxRateLimitRetries?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
 
 export interface ChatworkThreadId {

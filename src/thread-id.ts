@@ -4,17 +4,27 @@ import type { ChatworkThreadId } from "./types";
 const ADAPTER_NAME = "chatwork";
 
 export function encodeThreadId(data: ChatworkThreadId): string {
-  const roomId = encodeSegment(String(data.roomId));
+  const encodedRoomId = encodeSegment(String(data.roomId));
   if (!data.messageId) {
-    return `${ADAPTER_NAME}:${roomId}`;
+    return `${ADAPTER_NAME}:${encodedRoomId}`;
   }
 
-  return `${ADAPTER_NAME}:${roomId}:${encodeSegment(data.messageId)}`;
+  const encodedMessageId = encodeSegment(data.messageId);
+  if (data.replyToAccountId === undefined) {
+    return `${ADAPTER_NAME}:${encodedRoomId}:${encodedMessageId}`;
+  }
+
+  return `${ADAPTER_NAME}:${encodedRoomId}:${encodedMessageId}:${encodeSegment(String(data.replyToAccountId))}`;
 }
 
 export function decodeThreadId(threadId: string): ChatworkThreadId {
-  const [adapter, encodedRoomId, encodedMessageId, ...rest] =
-    threadId.split(":");
+  const [
+    adapter,
+    encodedRoomId,
+    encodedMessageId,
+    encodedReplyToAccountId,
+    ...rest
+  ] = threadId.split(":");
 
   if (adapter !== ADAPTER_NAME || !encodedRoomId || rest.length > 0) {
     throw new ValidationError(
@@ -31,9 +41,24 @@ export function decodeThreadId(threadId: string): ChatworkThreadId {
     );
   }
 
-  return encodedMessageId
-    ? { messageId: decodeSegment(encodedMessageId), roomId }
-    : { roomId };
+  const decoded: ChatworkThreadId = { roomId };
+
+  if (encodedMessageId) {
+    decoded.messageId = decodeSegment(encodedMessageId);
+  }
+
+  if (encodedReplyToAccountId) {
+    const replyToAccountId = Number(decodeSegment(encodedReplyToAccountId));
+    if (!Number.isInteger(replyToAccountId)) {
+      throw new ValidationError(
+        ADAPTER_NAME,
+        `Invalid Chatwork reply target account ID in thread ID: ${threadId}`
+      );
+    }
+    decoded.replyToAccountId = replyToAccountId;
+  }
+
+  return decoded;
 }
 
 function encodeSegment(value: string): string {

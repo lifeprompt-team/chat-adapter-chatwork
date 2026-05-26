@@ -10,12 +10,22 @@ export {
   preprocessChatworkToMarkdown,
   preserveMarkdownLineBreaks,
 } from "./format-converter";
+export { isAdapterRateLimitError } from "./errors";
+export {
+  AdapterError,
+  AdapterRateLimitError,
+} from "@chat-adapter/shared";
 export {
   hasToNotation,
   parseReplyNotation,
   renderReplyNotation,
   renderToNotation,
 } from "./notation";
+export {
+  collectReplyChainFromMessages,
+  DEFAULT_REPLY_CHAIN_MAX_DEPTH,
+  indexChatworkRoomMessagesById,
+} from "./reply-chain";
 export {
   createChatworkSignature,
   verifyChatworkSignature,
