@@ -46,3 +46,22 @@ export function collectReplyChainFromMessages(args: {
 
   return chain;
 }
+
+export function collectReplyChainForThreadAnchor(args: {
+  anchorMessageId: string;
+  maxDepth?: number;
+  messagesById: ReadonlyMap<string, ChatworkRoomMessage>;
+  roomId: number;
+}): ChatworkRoomMessage[] {
+  const anchorMessage = args.messagesById.get(args.anchorMessageId);
+  if (!anchorMessage) {
+    return [];
+  }
+
+  return collectReplyChainFromMessages({
+    maxDepth: args.maxDepth,
+    messageText: anchorMessage.body,
+    messagesById: args.messagesById,
+    roomId: args.roomId,
+  });
+}

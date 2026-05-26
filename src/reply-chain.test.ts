@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  collectReplyChainForThreadAnchor,
   collectReplyChainFromMessages,
   DEFAULT_REPLY_CHAIN_MAX_DEPTH,
   indexChatworkRoomMessagesById,
@@ -102,5 +103,35 @@ describe("collectReplyChainFromMessages", () => {
 
   it("uses the default max depth constant", () => {
     expect(DEFAULT_REPLY_CHAIN_MAX_DEPTH).toBe(30);
+  });
+});
+
+describe("collectReplyChainForThreadAnchor", () => {
+  it("walks ancestors from the anchor message id", () => {
+    const messages = [
+      createRoomMessage({
+        accountId: 1,
+        body: "root message",
+        messageId: "100",
+      }),
+      createRoomMessage({
+        accountId: 2,
+        body: "[rp aid=1 to=456-100] middle message",
+        messageId: "200",
+      }),
+      createRoomMessage({
+        accountId: 2,
+        body: "[rp aid=1 to=456-200] current reply",
+        messageId: "300",
+      }),
+    ];
+
+    const chain = collectReplyChainForThreadAnchor({
+      anchorMessageId: "300",
+      messagesById: indexChatworkRoomMessagesById({ messages }),
+      roomId: 456,
+    });
+
+    expect(chain.map((message) => message.message_id)).toEqual(["100", "200"]);
   });
 });

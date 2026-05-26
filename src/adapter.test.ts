@@ -389,6 +389,85 @@ describe("ChatworkAdapter", () => {
     expect(result.id).toBe("m-upload");
   });
 
+  it("fetchMessages returns reply-chain ancestors when thread id includes message id", async () => {
+    const fetch = createFetchMock({
+      "/rooms/456/members": () =>
+        new Response(
+          JSON.stringify([
+            { account_id: 1, name: "Alice", role: "member" },
+            { account_id: 2, name: "Bob", role: "member" },
+          ]),
+          { status: 200 }
+        ),
+      "/rooms/456/messages?force=1": () =>
+        new Response(
+          JSON.stringify([
+            {
+              account: { account_id: 1, name: "Alice" },
+              body: "root message",
+              message_id: "100",
+              send_time: 1,
+              update_time: 0,
+            },
+            {
+              account: { account_id: 2, name: "Bob" },
+              body: "[rp aid=1 to=456-100] middle message",
+              message_id: "200",
+              send_time: 2,
+              update_time: 0,
+            },
+            {
+              account: { account_id: 2, name: "Bob" },
+              body: "[rp aid=1 to=456-200] current reply",
+              message_id: "300",
+              send_time: 3,
+              update_time: 0,
+            },
+          ]),
+          { status: 200 }
+        ),
+      "/contacts": () => new Response(JSON.stringify([]), { status: 200 }),
+    });
+    const adapter = createAdapter({ fetch });
+
+    const result = await adapter.fetchMessages(
+      adapter.encodeThreadId({ messageId: "300", roomId: 456 })
+    );
+
+    expect(result.messages.map((message) => message.id)).toEqual(["100", "200"]);
+  });
+
+  it("fetchMessages returns room messages when thread id is room-only", async () => {
+    const fetch = createFetchMock({
+      "/rooms/456/members": () =>
+        new Response(
+          JSON.stringify([{ account_id: 1, name: "Alice", role: "member" }]),
+          { status: 200 }
+        ),
+      "/rooms/456/messages?force=1": () =>
+        new Response(
+          JSON.stringify([
+            {
+              account: { account_id: 1, name: "Alice" },
+              body: "hello",
+              message_id: "100",
+              send_time: 1,
+              update_time: 0,
+            },
+          ]),
+          { status: 200 }
+        ),
+      "/contacts": () => new Response(JSON.stringify([]), { status: 200 }),
+    });
+    const adapter = createAdapter({ fetch });
+
+    const result = await adapter.fetchMessages(
+      adapter.encodeThreadId({ roomId: 456 })
+    );
+
+    expect(result.messages.map((message) => message.id)).toEqual(["100"]);
+  });
+
   it("rejects invalid webhook signatures", async () => {
     const adapter = createAdapter();
     await adapter.initialize(createChat());

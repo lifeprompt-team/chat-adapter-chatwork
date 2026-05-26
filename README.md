@@ -71,7 +71,7 @@ See [docs/setup.md](docs/setup.md) for Chatwork Webhook and token details.
 - `editMessage()`.
 - `deleteMessage()`.
 - `fetchMessage()`.
-- `fetchMessages()` for the latest room messages.
+- `fetchMessages()` returns reply-chain ancestors when the thread ID includes a message ID, otherwise the latest room messages.
 - `fetchThread()` using room metadata.
 - Stable thread ID encode/decode.
 - Basic HTTP error mapping.

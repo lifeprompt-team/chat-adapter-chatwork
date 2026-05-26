@@ -22,6 +22,7 @@ export {
   renderToNotation,
 } from "./notation";
 export {
+  collectReplyChainForThreadAnchor,
   collectReplyChainFromMessages,
   DEFAULT_REPLY_CHAIN_MAX_DEPTH,
   indexChatworkRoomMessagesById,

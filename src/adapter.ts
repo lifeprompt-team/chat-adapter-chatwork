@@ -24,6 +24,10 @@ import { resolveInboundAttachments } from "./attachments";
 import { ChatworkClient } from "./client";
 import { ChatworkFormatConverter } from "./format-converter";
 import { hasToNotation, parseReplyNotation, renderReplyNotation } from "./notation";
+import {
+  collectReplyChainForThreadAnchor,
+  indexChatworkRoomMessagesById,
+} from "./reply-chain";
 import { decodeThreadId, encodeThreadId } from "./thread-id";
 import type {
   ChatworkAdapterConfig,
@@ -361,11 +365,19 @@ export class ChatworkAdapter
     _options?: FetchOptions
   ): Promise<FetchResult<ChatworkRoomMessage>> {
     const decoded = this.decodeThreadId(threadId);
-    const messages = await this.client.getRoomMessages(decoded.roomId);
+    const roomMessages = await this.client.getRoomMessages(decoded.roomId);
+    const selectedMessages =
+      decoded.messageId === undefined
+        ? roomMessages
+        : collectReplyChainForThreadAnchor({
+            anchorMessageId: decoded.messageId,
+            messagesById: indexChatworkRoomMessagesById({ messages: roomMessages }),
+            roomId: decoded.roomId,
+          });
 
     return {
       messages: await Promise.all(
-        messages.map(async (message) =>
+        selectedMessages.map(async (message) =>
           this.enrichInboundMessage(
             this.messageFromRoomMessage(message, decoded.roomId)
           )
