@@ -1,4 +1,5 @@
 import { NetworkError } from "@chat-adapter/shared";
+import { toBlobPart } from "./blob";
 import { isAdapterRateLimitError, mapChatworkResponseError } from "./errors";
 import type {
   ChatworkClientConfig,
@@ -258,14 +259,4 @@ export class ChatworkClient {
 
     return JSON.parse(text) as T;
   }
-}
-
-function toBlobPart(args: { data: Blob | Buffer | ArrayBuffer }): BlobPart {
-  if (args.data instanceof Blob) {
-    return args.data;
-  }
-  if (Buffer.isBuffer(args.data)) {
-    return Uint8Array.from(args.data);
-  }
-  return args.data;
 }

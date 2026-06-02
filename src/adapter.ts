@@ -1,4 +1,5 @@
 import {
+  AuthenticationError,
   extractFiles,
   ResourceNotFoundError,
   ValidationError,
@@ -21,9 +22,15 @@ import {
   type WebhookOptions,
 } from "chat";
 import { resolveInboundAttachments } from "./attachments";
+import { MAX_FILE_BYTES, readBlobSize, toUploadBlob } from "./blob";
 import { ChatworkClient } from "./client";
 import { ChatworkFormatConverter } from "./format-converter";
-import { hasToNotation, parseReplyNotation, renderReplyNotation } from "./notation";
+import {
+  getWebhookAuthorAccountId,
+  isWebhookMentionPayload,
+  shouldProcessInboundWebhook,
+} from "./inbound-webhook-filter";
+import { hasToNotation, renderReplyNotation } from "./notation";
 import {
   collectReplyChainForThreadAnchor,
   indexChatworkRoomMessagesById,
@@ -32,23 +39,18 @@ import { decodeThreadId, encodeThreadId } from "./thread-id";
 import type {
   ChatworkAdapterConfig,
   ChatworkContact,
-  ChatworkMessageCreatedEvent,
-  ChatworkMentionToMeEvent,
   ChatworkPostMessageResponse,
   ChatworkRoomMember,
   ChatworkRoomMessage,
   ChatworkThreadId,
   ChatworkWebhookPayload,
 } from "./types";
-import {
-  UnauthorizedChatworkWebhookError,
-  verifyChatworkWebhook,
-} from "./webhook";
+import { verifyChatworkWebhook, type VerifiedChatworkWebhook } from "./webhook";
 
 const MAX_BODY_LENGTH = 65535;
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const CONTACTS_CACHE_TTL_MS = 60_000;
 const ROOM_MEMBERS_CACHE_TTL_MS = 60_000;
+const UNKNOWN_ROOM_TYPE = "unknown";
 
 export class ChatworkAdapter
   implements Adapter<ChatworkThreadId, unknown>
@@ -111,7 +113,17 @@ export class ChatworkAdapter
   isDM(threadId: string): boolean {
     const decoded = this.decodeThreadId(threadId);
     const cachedType = this.roomTypeById.get(decoded.roomId);
-    return cachedType === "direct";
+    if (cachedType !== undefined) {
+      return cachedType === "direct";
+    }
+
+    if (
+      this.contactsCache?.some((contact) => contact.room_id === decoded.roomId)
+    ) {
+      return true;
+    }
+
+    return false;
   }
 
   async openDM(userId: string): Promise<string> {
@@ -130,7 +142,7 @@ export class ChatworkAdapter
       );
     }
 
-    this.roomTypeById.set(contact.room_id, "direct");
+    this.cacheRoomType({ roomId: contact.room_id, type: "direct" });
     return encodeThreadId({ roomId: contact.room_id });
   }
 
@@ -170,7 +182,7 @@ export class ChatworkAdapter
     request: Request,
     options?: WebhookOptions
   ): Promise<Response> {
-    let verified;
+    let verified: VerifiedChatworkWebhook;
 
     try {
       verified = await verifyChatworkWebhook(
@@ -178,7 +190,7 @@ export class ChatworkAdapter
         this.config.webhookToken
       );
     } catch (error) {
-      if (error instanceof UnauthorizedChatworkWebhookError) {
+      if (error instanceof AuthenticationError) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -214,7 +226,7 @@ export class ChatworkAdapter
     }
 
     const event = raw.webhook_event;
-    const accountId = getAuthorAccountId(raw);
+    const accountId = getWebhookAuthorAccountId(raw);
     const threadId = this.encodeThreadId({
       messageId: event.message_id,
       replyToAccountId: accountId,
@@ -279,7 +291,10 @@ export class ChatworkAdapter
       }
 
       const upload = await this.client.uploadRoomFile({
-        file: toUploadBlob({ file }),
+        file: toUploadBlob({
+          data: file.data,
+          mimeType: file.mimeType,
+        }),
         filename: file.filename,
         message: uploadMessage,
         mimeType: file.mimeType,
@@ -389,9 +404,7 @@ export class ChatworkAdapter
   async fetchThread(threadId: string): Promise<ThreadInfo> {
     const decoded = this.decodeThreadId(threadId);
     const room = await this.client.getRoom(decoded.roomId);
-    if (room.type) {
-      this.roomTypeById.set(decoded.roomId, room.type);
-    }
+    this.cacheRoomType({ roomId: decoded.roomId, type: room.type });
 
     return {
       channelId: String(decoded.roomId),
@@ -444,6 +457,8 @@ export class ChatworkAdapter
     const attachments = await resolveInboundAttachments({
       body: message.text,
       client: this.client,
+      fetch: this.config.fetch,
+      logger: this.logger,
       roomId: decoded.roomId,
     });
     const author = await this.resolveAuthor({
@@ -515,6 +530,10 @@ export class ChatworkAdapter
     };
   }
 
+  private cacheRoomType(args: { roomId: number; type?: string }): void {
+    this.roomTypeById.set(args.roomId, args.type ?? UNKNOWN_ROOM_TYPE);
+  }
+
   private async getContactsCached(): Promise<ChatworkContact[]> {
     if (this.contactsCache && Date.now() < this.contactsCacheExpiresAt) {
       return this.contactsCache;
@@ -543,14 +562,12 @@ export class ChatworkAdapter
 
   private async isDirectRoom(roomId: number): Promise<boolean> {
     const cachedType = this.roomTypeById.get(roomId);
-    if (cachedType) {
+    if (cachedType !== undefined) {
       return cachedType === "direct";
     }
 
     const room = await this.client.getRoom(roomId);
-    if (room.type) {
-      this.roomTypeById.set(roomId, room.type);
-    }
+    this.cacheRoomType({ roomId, type: room.type });
     return room.type === "direct";
   }
 
@@ -565,11 +582,10 @@ export class ChatworkAdapter
 
     const accountId = await this.resolveReplyToAccountId(thread);
     if (!accountId) {
-      this.logger.warn("Could not resolve Chatwork reply target account ID", {
-        messageId: thread.messageId,
-        roomId: thread.roomId,
-      });
-      return body;
+      throw new ValidationError(
+        "chatwork",
+        `Could not resolve Chatwork reply target for message ${thread.messageId} in room ${thread.roomId}`
+      );
     }
 
     return `${renderReplyNotation({
@@ -605,43 +621,20 @@ export class ChatworkAdapter
   private async shouldProcessPayload(
     payload: ChatworkWebhookPayload
   ): Promise<boolean> {
-    const accountId = getAuthorAccountId(payload);
-    if (this.botAccountId && accountId === this.botAccountId) {
-      return false;
-    }
-
-    if (payload.webhook_event_type === "mention_to_me") {
-      return true;
-    }
-
-    if (this.isMentionPayload(payload)) {
-      return true;
-    }
-
-    if (parseReplyNotation(payload.webhook_event.body)) {
-      return true;
-    }
-
-    if (payload.webhook_event_type === "message_created") {
-      return this.isDirectRoom(payload.webhook_event.room_id);
-    }
-
-    return false;
+    return shouldProcessInboundWebhook({
+      botAccountId: this.botAccountId,
+      isDirectRoom: (roomId) => this.isDirectRoom(roomId),
+      payload,
+      treatRoomMessagesAsMentions: this.config.treatRoomMessagesAsMentions,
+    });
   }
 
   private isMentionPayload(payload: ChatworkWebhookPayload): boolean {
-    if (payload.webhook_event_type === "mention_to_me") {
-      return true;
-    }
-
-    if (this.config.treatRoomMessagesAsMentions === true) {
-      return true;
-    }
-
-    return Boolean(
-      this.botAccountId &&
-        hasToNotation(payload.webhook_event.body, this.botAccountId)
-    );
+    return isWebhookMentionPayload({
+      botAccountId: this.botAccountId,
+      payload,
+      treatRoomMessagesAsMentions: this.config.treatRoomMessagesAsMentions,
+    });
   }
 
   private messageFromRoomMessage(
@@ -712,51 +705,16 @@ function validateBodyLength(body: string): void {
   }
 }
 
-function validateUploadSize(args: { file: { data: Blob | Buffer | ArrayBuffer; filename: string } }): void {
-  const size = readUploadSize({ data: args.file.data });
-  if (size > MAX_UPLOAD_BYTES) {
+function validateUploadSize(args: {
+  file: { data: Blob | Buffer | ArrayBuffer; filename: string };
+}): void {
+  const size = readBlobSize({ data: args.file.data });
+  if (size > MAX_FILE_BYTES) {
     throw new ValidationError(
       "chatwork",
-      `Chatwork file uploads must be ${MAX_UPLOAD_BYTES} bytes or fewer`
+      `Chatwork file uploads must be ${MAX_FILE_BYTES} bytes or fewer`
     );
   }
-}
-
-function readUploadSize(args: { data: Blob | Buffer | ArrayBuffer }): number {
-  if (Buffer.isBuffer(args.data)) {
-    return args.data.byteLength;
-  }
-  if (args.data instanceof ArrayBuffer) {
-    return args.data.byteLength;
-  }
-  return args.data.size;
-}
-
-function toUploadBlob(args: {
-  file: { data: Blob | Buffer | ArrayBuffer; filename: string; mimeType?: string };
-}): Blob | Buffer {
-  if (args.file.data instanceof Buffer || args.file.data instanceof Blob) {
-    return args.file.data;
-  }
-  return new Blob([toBlobPart({ data: args.file.data })], {
-    type: args.file.mimeType ?? "application/octet-stream",
-  });
-}
-
-function toBlobPart(args: { data: Blob | Buffer | ArrayBuffer }): BlobPart {
-  if (args.data instanceof Blob) {
-    return args.data;
-  }
-  if (Buffer.isBuffer(args.data)) {
-    return Uint8Array.from(args.data);
-  }
-  return args.data;
-}
-
-function getAuthorAccountId(payload: ChatworkWebhookPayload): number {
-  return payload.webhook_event_type === "mention_to_me"
-    ? (payload.webhook_event as ChatworkMentionToMeEvent).from_account_id
-    : (payload.webhook_event as ChatworkMessageCreatedEvent).account_id;
 }
 
 function isChatworkWebhookPayload(value: unknown): value is ChatworkWebhookPayload {

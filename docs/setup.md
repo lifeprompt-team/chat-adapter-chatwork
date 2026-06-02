@@ -49,13 +49,16 @@ Chatwork does not expose Slack-style native thread resources. The adapter repres
 ```text
 chatwork:{base64url(roomId)}
 chatwork:{base64url(roomId)}:{base64url(messageId)}
+chatwork:{base64url(roomId)}:{base64url(messageId)}:{base64url(replyToAccountId)}
 ```
 
-When a message ID is present, `postMessage()` tries to fetch the original message author and uses Chatwork reply notation:
+When a message ID is present, `postMessage()` prefixes the outgoing body with Chatwork reply notation. If `replyToAccountId` is present, the adapter skips the extra `getRoomMessage()` lookup.
 
 ```text
 [rp aid={accountId} to={roomId}-{messageId}]
 ```
+
+When `fetchMessages()` receives a message-scoped thread ID, it returns reply-chain ancestors only (not the anchor message). The result depends on Chatwork message history window size.
 
 ## Subscribed follow-ups
 
@@ -77,6 +80,8 @@ Inbound file messages include Chatwork download notation in the message body:
 ```
 
 The adapter resolves these into Chat SDK `attachments` with short-lived download URLs.
+
+Inbound downloads and outbound uploads both enforce a 5MB limit per file. When multiple files are posted in one call, only the first file carries the message caption.
 
 Outbound uploads use `POST /rooms/{room_id}/files` with a 5MB limit per file.
 

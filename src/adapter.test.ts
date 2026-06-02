@@ -284,6 +284,102 @@ describe("ChatworkAdapter", () => {
     await expect(adapter.openDM("123")).resolves.toBe(
       adapter.encodeThreadId({ roomId: 456 })
     );
+    expect(adapter.isDM(adapter.encodeThreadId({ roomId: 456 }))).toBe(true);
+  });
+
+  it("returns false from isDM before room type is cached", () => {
+    const adapter = createAdapter();
+
+    expect(adapter.isDM(adapter.encodeThreadId({ roomId: 456 }))).toBe(false);
+  });
+
+  it("returns true from isDM when contacts cache contains the room", async () => {
+    const fetch = createFetchMock({
+      "/contacts": () =>
+        new Response(
+          JSON.stringify([{ account_id: 123, name: "Alice", room_id: 456 }]),
+          { status: 200 }
+        ),
+    });
+    const adapter = createAdapter({ fetch });
+
+    await adapter.getUser("123");
+
+    expect(adapter.isDM(adapter.encodeThreadId({ roomId: 456 }))).toBe(true);
+  });
+
+  it("ignores webhook events from the bot account", async () => {
+    const processMessage = vi.fn();
+    const fetch = createFetchMock({
+      "/contacts": () => new Response(JSON.stringify([]), { status: 200 }),
+    });
+    const adapter = createAdapter({ fetch });
+    await adapter.initialize(createChat(processMessage));
+
+    const body = JSON.stringify({
+      webhook_event: {
+        account_id: 999,
+        body: "self message",
+        message_id: "m1",
+        room_id: 456,
+        send_time: 1498028125,
+        update_time: 0,
+      },
+      webhook_event_time: 1498028130,
+      webhook_event_type: "message_created",
+      webhook_setting_id: "setting-1",
+    });
+
+    const response = await adapter.handleWebhook(
+      new Request("https://example.com/webhook", {
+        body,
+        headers: {
+          "x-chatworkwebhooksignature": createChatworkSignature(
+            body,
+            Buffer.from("webhook-secret").toString("base64")
+          ),
+        },
+        method: "POST",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(processMessage).not.toHaveBeenCalled();
+  });
+
+  it("throws when reply target cannot be resolved for threaded postMessage", async () => {
+    const fetch = createFetchMock({
+      "/rooms/456/messages/m1": () =>
+        new Response(JSON.stringify({ errors: ["not found"] }), { status: 404 }),
+    });
+    const adapter = createAdapter({ fetch });
+
+    await expect(
+      adapter.postMessage(
+        adapter.encodeThreadId({ messageId: "m1", roomId: 456 }),
+        { markdown: "reply" }
+      )
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("Could not resolve Chatwork reply target"),
+    });
+  });
+
+  it("rejects outbound files over 5MB", async () => {
+    const adapter = createAdapter();
+
+    await expect(
+      adapter.postMessage(adapter.encodeThreadId({ roomId: 456 }), {
+        files: [
+          {
+            data: Buffer.alloc(5 * 1024 * 1024 + 1),
+            filename: "large.bin",
+          },
+        ],
+        markdown: "attached",
+      })
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("5"),
+    });
   });
 
   it("throws when direct room is not found", async () => {

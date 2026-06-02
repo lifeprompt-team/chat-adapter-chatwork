@@ -93,9 +93,22 @@ Thread IDs represent a Chatwork room and, optionally, the message being replied 
 ```text
 chatwork:{base64url(roomId)}
 chatwork:{base64url(roomId)}:{base64url(messageId)}
+chatwork:{base64url(roomId)}:{base64url(messageId)}:{base64url(replyToAccountId)}
 ```
 
-When a thread ID includes a message ID, `postMessage()` tries to fetch the original message and prefix the outgoing body with Chatwork reply notation.
+When a thread ID includes a message ID, `postMessage()` prefixes the outgoing body with Chatwork reply notation. If `replyToAccountId` is present in the thread ID, the adapter skips the extra `getRoomMessage()` lookup.
+
+`isDM()` returns `true` after `openDM()`, `fetchThread()`, a cached room lookup, or when the room ID matches a cached contacts entry. Before that, it returns `false`.
+
+## fetchMessages
+
+- Room-only thread IDs return the latest room messages from Chatwork.
+- Message-scoped thread IDs return reply-chain **ancestors only** (the anchor message itself is excluded).
+- Results depend on Chatwork `GET /rooms/{room_id}/messages` window size. Missing parents yield a shorter chain.
+
+## Attachments
+
+Inbound downloads and outbound uploads both enforce a 5MB limit per file. When multiple files are posted in one call, only the first file carries the message caption; additional files upload without text.
 
 ## Message behavior
 
