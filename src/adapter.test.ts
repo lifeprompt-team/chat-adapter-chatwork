@@ -445,21 +445,36 @@ describe("ChatworkAdapter", () => {
     expect(processMessage).not.toHaveBeenCalled();
   });
 
-  it("throws when reply target cannot be resolved for threaded postMessage", async () => {
+  it("posts without reply notation when reply target cannot be resolved", async () => {
+    let postedBody = "";
     const fetch = createFetchMock({
       "/rooms/456/messages/m1": () =>
         new Response(JSON.stringify({ errors: ["not found"] }), { status: 404 }),
+      "/rooms/456/messages": () =>
+        new Response(JSON.stringify({ message_id: "bot-1" }), {
+          status: 200,
+        }),
     });
-    const adapter = createAdapter({ fetch });
+    const fetchWithCapture = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/rooms/456/messages") && !url.includes("/messages/m1")) {
+        const body = init?.body;
+        if (body instanceof URLSearchParams) {
+          postedBody = body.get("body") ?? "";
+        }
+      }
+      return fetch(input, init);
+    });
+    const adapter = createAdapter({ fetch: fetchWithCapture });
 
-    await expect(
-      adapter.postMessage(
-        adapter.encodeThreadId({ messageId: "m1", roomId: 456 }),
-        { markdown: "reply" }
-      )
-    ).rejects.toMatchObject({
-      message: expect.stringContaining("Could not resolve Chatwork reply target"),
-    });
+    const result = await adapter.postMessage(
+      adapter.encodeThreadId({ messageId: "m1", roomId: 456 }),
+      { markdown: "reply" }
+    );
+
+    expect(result.id).toBe("bot-1");
+    expect(postedBody).toBe("reply");
+    expect(postedBody).not.toContain("[rp ");
   });
 
   it("postMessage の threadId は返信先アンカーを維持する", async () => {

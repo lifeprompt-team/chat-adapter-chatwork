@@ -689,10 +689,14 @@ export class ChatworkAdapter
 
     const accountId = await this.resolveReplyToAccountId(thread);
     if (!accountId) {
-      throw new ValidationError(
-        "chatwork",
-        `Could not resolve Chatwork reply target for message ${thread.messageId} in room ${thread.roomId}`
+      this.logger.warn(
+        "Could not resolve Chatwork reply target; sending body without reply notation",
+        {
+          messageId: thread.messageId,
+          roomId: thread.roomId,
+        }
       );
+      return body;
     }
 
     return `${renderReplyNotation({
