@@ -98,18 +98,20 @@ export function collectReplyChainForThreadAnchor(args: {
   });
 }
 
-/** 返信チェーンのルート message_id。`[rp]` が無い場合は messageId をそのまま返す。 */
-export function resolveReplyChainRootMessageId(args: {
-  _recursionDepth?: number;
+type ResolveReplyChainRootMessageIdArgs = {
   maxDepth?: number;
   messageId: string;
   messageText: string;
   messagesById: ReadonlyMap<string, ChatworkRoomMessage>;
+  recursionDepth: number;
   roomId: number;
-}): string {
+};
+
+function resolveReplyChainRootMessageIdInternal(
+  args: ResolveReplyChainRootMessageIdArgs
+): string {
   const maxDepth = args.maxDepth ?? DEFAULT_REPLY_CHAIN_MAX_DEPTH;
-  const recursionDepth = args._recursionDepth ?? 0;
-  if (recursionDepth >= maxDepth) {
+  if (args.recursionDepth >= maxDepth) {
     return args.messageId;
   }
 
@@ -154,12 +156,30 @@ export function resolveReplyChainRootMessageId(args: {
     return rootId;
   }
 
-  return resolveReplyChainRootMessageId({
-    _recursionDepth: recursionDepth + 1,
+  return resolveReplyChainRootMessageIdInternal({
     maxDepth: args.maxDepth,
     messageId: priorMessageId,
     messageText: priorMessage.body,
     messagesById: args.messagesById,
+    recursionDepth: args.recursionDepth + 1,
+    roomId: args.roomId,
+  });
+}
+
+/** 返信チェーンのルート message_id。`[rp]` が無い場合は messageId をそのまま返す。 */
+export function resolveReplyChainRootMessageId(args: {
+  maxDepth?: number;
+  messageId: string;
+  messageText: string;
+  messagesById: ReadonlyMap<string, ChatworkRoomMessage>;
+  roomId: number;
+}): string {
+  return resolveReplyChainRootMessageIdInternal({
+    maxDepth: args.maxDepth,
+    messageId: args.messageId,
+    messageText: args.messageText,
+    messagesById: args.messagesById,
+    recursionDepth: 0,
     roomId: args.roomId,
   });
 }
