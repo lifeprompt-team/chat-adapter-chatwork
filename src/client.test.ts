@@ -197,6 +197,40 @@ describe("ChatworkClient", () => {
     }
   });
 
+  it("clamps non-positive retryAfter to one second", async () => {
+    vi.useFakeTimers({ now: new Date("2024-06-01T00:00:00Z") });
+    try {
+      const sleep = vi.fn(async () => undefined);
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ errors: ["too many requests"] }), {
+            headers: {
+              "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) - 5),
+            },
+            status: 429,
+          })
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ message_id: "m1" }), { status: 200 })
+        );
+      const client = new ChatworkClient({
+        apiToken: "token",
+        fetch: fetchMock,
+        maxRateLimitRetries: 2,
+        sleep,
+      });
+
+      await expect(
+        client.postRoomMessage({ body: "hello", roomId: 123 })
+      ).resolves.toEqual({ message_id: "m1" });
+
+      expect(sleep).toHaveBeenCalledWith(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("throws after exhausting rate limit retries", async () => {
     vi.useFakeTimers({ now: new Date("2024-06-01T00:00:00Z") });
     try {

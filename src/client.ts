@@ -232,8 +232,10 @@ export class ChatworkClient {
         }
 
         attempt += 1;
-        const retryAfterSeconds =
-          error.retryAfter ?? DEFAULT_RATE_LIMIT_RETRY_SECONDS;
+        const retryAfterSeconds = Math.max(
+          error.retryAfter ?? DEFAULT_RATE_LIMIT_RETRY_SECONDS,
+          1
+        );
         await this.sleep(retryAfterSeconds * 1000);
       }
     }

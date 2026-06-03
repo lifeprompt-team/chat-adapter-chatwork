@@ -108,7 +108,7 @@ When a thread ID includes a message ID, `postMessage()` prefixes the outgoing bo
 
 ## Attachments
 
-Inbound downloads and outbound uploads both enforce a 5MB limit per file. When multiple files are posted in one call, only the first file carries the message caption; additional files upload without text.
+Inbound downloads and outbound uploads both enforce a 5MB limit per file. Inbound attachment metadata is resolved lazily when `fetchData` runs. When multiple files are posted in one call, only the first file carries the message caption; additional files upload without text, and only the last upload's message ID is returned.
 
 ## Message behavior
 
@@ -119,9 +119,9 @@ Inbound downloads and outbound uploads both enforce a 5MB limit per file. When m
 - `message_created` events containing reply notation (`[rp aid=...]`) are forwarded for pending-style replies.
 - Set `treatRoomMessagesAsMentions: true` if your bot should process all room messages.
 - Events from the bot account are ignored when `botAccountId` is configured.
-- Outbound bodies over 65,535 characters throw `ValidationError`.
-- Outbound files over 5MB throw `ValidationError`.
-- Outbound bold, italic, and strikethrough markers are stripped because Chatwork has no equivalent syntax.
+- Message bodies over 65,535 characters throw `ValidationError`.
+- Uploaded files over 5MB throw `ValidationError`.
+- Bold, italic, and strikethrough markers are stripped because Chatwork has no equivalent syntax.
 - Heading-only lines are sent as plain text; headings with body content use `[info][title]`.
 
 ## Subscribed threads and webhooks
