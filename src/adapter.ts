@@ -235,8 +235,10 @@ export class ChatworkAdapter
       return new Response("OK", { status: 200 });
     }
 
-    const message = await this.normalizeInboundThreadId(
-      await this.enrichInboundMessage(this.parseMessage(payload))
+    const message = await this.normalizeDirectDmThreadId(
+      await this.normalizeInboundThreadId(
+        await this.enrichInboundMessage(this.parseMessage(payload))
+      )
     );
     this.requireChat().processMessage(this, message.threadId, message, options);
 
@@ -516,6 +518,55 @@ export class ChatworkAdapter
       "Chatwork reactions are not supported",
       "removeReaction"
     );
+  }
+
+  private async resolveRoomType(roomId: number): Promise<string> {
+    const cached = this.readCachedRoomType(roomId);
+    if (cached) {
+      return cached;
+    }
+
+    const room = await this.client.getRoom(roomId);
+    const roomType = room.type ?? UNKNOWN_ROOM_TYPE;
+    this.cacheRoomType({
+      roomId,
+      type: roomType,
+    });
+    return roomType;
+  }
+
+  /** DM はメッセージ単位 threadId ではなくルーム単位に揃える（AgentLog 継続用） */
+  private async normalizeDirectDmThreadId<T>(
+    message: Message<T>
+  ): Promise<Message<T>> {
+    const decoded = this.decodeThreadId(message.threadId);
+    if (!decoded.messageId) {
+      return message;
+    }
+
+    const roomType = await this.resolveRoomType(decoded.roomId);
+    if (roomType !== "direct") {
+      return message;
+    }
+
+    const stableThreadId = this.encodeThreadId({
+      roomId: decoded.roomId,
+    });
+    if (stableThreadId === message.threadId) {
+      return message;
+    }
+
+    return new Message<T>({
+      attachments: message.attachments,
+      author: message.author,
+      formatted: message.formatted,
+      id: message.id,
+      isMention: message.isMention,
+      metadata: message.metadata,
+      raw: message.raw,
+      text: message.text,
+      threadId: stableThreadId,
+    });
   }
 
   private async normalizeInboundThreadId<T>(

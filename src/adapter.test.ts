@@ -138,6 +138,11 @@ describe("ChatworkAdapter", () => {
           JSON.stringify([{ account_id: 123, name: "Alice", room_id: 456 }]),
           { status: 200 }
         ),
+      "/rooms/456": () =>
+        new Response(
+          JSON.stringify({ name: "Group", room_id: 456, type: "group" }),
+          { status: 200 }
+        ),
     });
     const adapter = createAdapter({ fetch });
     await adapter.initialize(createChat(processMessage));
@@ -308,6 +313,12 @@ describe("ChatworkAdapter", () => {
     expect(response.status).toBe(200);
     expect(processMessage).toHaveBeenCalledTimes(1);
     expect(processMessage.mock.calls[0]?.[2]?.author.fullName).toBe("Alice");
+    const [, dmThreadId] = processMessage.mock.calls[0] ?? [];
+    expect(dmThreadId).toBe(
+      adapter.encodeThreadId({
+        roomId: 456,
+      })
+    );
   });
 
   it("processes reply notation in group rooms", async () => {
