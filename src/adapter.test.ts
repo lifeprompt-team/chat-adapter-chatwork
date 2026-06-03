@@ -629,6 +629,61 @@ describe("ChatworkAdapter", () => {
     expect(result.id).toBe("m-upload");
   });
 
+  it("resolves uploaded file metadata only for the last file in a multi-file post", async () => {
+    let uploadCount = 0;
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+
+      if (url.includes("/rooms/456/files/42")) {
+        throw new Error("getRoomFile should not be called for the first upload");
+      }
+      if (url.includes("/rooms/456/files/43") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            account: { account_id: 999, name: "Bot" },
+            file_id: 43,
+            filename: "second.txt",
+            filesize: 6,
+            message_id: "m-second",
+            upload_time: 2,
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes("/rooms/456/files") && method === "POST") {
+        uploadCount += 1;
+        return new Response(
+          JSON.stringify({ file_id: uploadCount === 1 ? 42 : 43 }),
+          { status: 200 }
+        );
+      }
+
+      return new Response(JSON.stringify({ errors: [`Unhandled fetch: ${url}`] }), {
+        status: 500,
+      });
+    });
+    const adapter = createAdapter({ fetch });
+
+    const result = await adapter.postMessage(
+      adapter.encodeThreadId({ roomId: 456 }),
+      {
+        files: [
+          { data: Buffer.from("one"), filename: "one.txt" },
+          { data: Buffer.from("two"), filename: "two.txt" },
+        ],
+        markdown: "attached",
+      }
+    );
+
+    expect(result.id).toBe("m-second");
+    expect(
+      fetch.mock.calls.filter(([request]) =>
+        String(request).includes("/rooms/456/files/43")
+      )
+    ).toHaveLength(1);
+  });
+
   it("keeps uploaded files successful when uploaded file metadata is unavailable", async () => {
     const fetch = createFetchMock({
       "/rooms/456/files/42": () =>

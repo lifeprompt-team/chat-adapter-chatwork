@@ -314,11 +314,13 @@ export class ChatworkAdapter
         roomId: decoded.roomId,
       });
 
-      lastPostReference = await this.resolveUploadedFilePostReference({
-        decoded,
-        fileId: upload.file_id,
-        roomId: decoded.roomId,
-      });
+      if (index === files.length - 1) {
+        lastPostReference = await this.resolveUploadedFilePostReference({
+          decoded,
+          fileId: upload.file_id,
+          roomId: decoded.roomId,
+        });
+      }
     }
 
     if (!lastPostReference) {
