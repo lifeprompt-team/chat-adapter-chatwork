@@ -61,6 +61,9 @@ export async function shouldProcessInboundWebhook(args: {
     return true;
   }
 
+  // [rp] はグループでボット投稿への返信を拾うための記法。
+  // DM では自分の過去メッセージへ [rp] する UI はなく、引用は [qt] で届く（parseReplyNotation の対象外）。
+  // そのため [rp] かつ親がボット以外は意図的に弾く。DM の通常メッセージ・引用は下の isDirectRoom で処理する。
   const replyNotation = parseReplyNotation(args.payload.webhook_event.body);
   if (
     replyNotation &&
