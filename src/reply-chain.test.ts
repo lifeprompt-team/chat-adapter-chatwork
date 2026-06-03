@@ -201,4 +201,24 @@ describe("resolveReplyChainRootMessageId", () => {
       })
     ).toBe("2113948355263737856");
   });
+
+  it("stops recursive self-reply repair at maxDepth", () => {
+    const messages = Array.from({ length: 5 }, (_, index) =>
+      createRoomMessage({
+        accountId: 999,
+        body: `[rp aid=999 to=456-msg-${index}] broken self reply`,
+        messageId: `msg-${index}`,
+      }),
+    );
+
+    expect(
+      resolveReplyChainRootMessageId({
+        maxDepth: 2,
+        messageId: "msg-4",
+        messageText: messages[4]!.body,
+        messagesById: indexChatworkRoomMessagesById({ messages }),
+        roomId: 456,
+      })
+    ).toBe("msg-2");
+  });
 });

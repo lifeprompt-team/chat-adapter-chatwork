@@ -56,11 +56,11 @@ describe("inbound webhook filter", () => {
     ).resolves.toBe(true);
   });
 
-  it("accepts reply notation in group rooms", async () => {
+  it("accepts reply notation in group rooms when the parent message is from the bot", async () => {
     const payload: ChatworkWebhookPayload = {
       webhook_event: {
         account_id: 123,
-        body: "[rp aid=999 to=456-m1]\nanswer",
+        body: "[rp aid=123 to=456-m1]\nanswer",
         message_id: "m2",
         room_id: 456,
         send_time: 1,
@@ -75,9 +75,35 @@ describe("inbound webhook filter", () => {
       shouldProcessInboundWebhook({
         botAccountId: 999,
         isDirectRoom: vi.fn().mockResolvedValue(false),
+        isReplyParentAuthoredByBot: vi.fn().mockResolvedValue(true),
         payload,
       })
     ).resolves.toBe(true);
+  });
+
+  it("ignores reply notation in group rooms when the parent message is not from the bot", async () => {
+    const payload: ChatworkWebhookPayload = {
+      webhook_event: {
+        account_id: 123,
+        body: "[rp aid=123 to=456-m1]\nanswer",
+        message_id: "m2",
+        room_id: 456,
+        send_time: 1,
+        update_time: 0,
+      },
+      webhook_event_time: 2,
+      webhook_event_type: "message_created",
+      webhook_setting_id: "setting-1",
+    };
+
+    await expect(
+      shouldProcessInboundWebhook({
+        botAccountId: 999,
+        isDirectRoom: vi.fn().mockResolvedValue(false),
+        isReplyParentAuthoredByBot: vi.fn().mockResolvedValue(false),
+        payload,
+      })
+    ).resolves.toBe(false);
   });
 
   it("accepts direct room message_created events", async () => {

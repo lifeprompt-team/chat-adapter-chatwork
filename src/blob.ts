@@ -24,7 +24,7 @@ export function toUploadBlob(args: {
   data: Blob | Buffer | ArrayBuffer;
   mimeType?: string;
 }): Blob | Buffer {
-  if (args.data instanceof Buffer || args.data instanceof Blob) {
+  if (Buffer.isBuffer(args.data) || args.data instanceof Blob) {
     return args.data;
   }
   return new Blob([toBlobPart({ data: args.data })], {

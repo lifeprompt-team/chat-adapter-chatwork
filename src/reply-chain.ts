@@ -100,12 +100,19 @@ export function collectReplyChainForThreadAnchor(args: {
 
 /** 返信チェーンのルート message_id。`[rp]` が無い場合は messageId をそのまま返す。 */
 export function resolveReplyChainRootMessageId(args: {
+  _recursionDepth?: number;
   maxDepth?: number;
   messageId: string;
   messageText: string;
   messagesById: ReadonlyMap<string, ChatworkRoomMessage>;
   roomId: number;
 }): string {
+  const maxDepth = args.maxDepth ?? DEFAULT_REPLY_CHAIN_MAX_DEPTH;
+  const recursionDepth = args._recursionDepth ?? 0;
+  if (recursionDepth >= maxDepth) {
+    return args.messageId;
+  }
+
   const chain = collectReplyChainFromMessages({
     maxDepth: args.maxDepth,
     messageText: args.messageText,
@@ -148,6 +155,7 @@ export function resolveReplyChainRootMessageId(args: {
   }
 
   return resolveReplyChainRootMessageId({
+    _recursionDepth: recursionDepth + 1,
     maxDepth: args.maxDepth,
     messageId: priorMessageId,
     messageText: priorMessage.body,

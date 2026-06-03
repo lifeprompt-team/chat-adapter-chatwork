@@ -35,6 +35,10 @@ export function isWebhookMentionPayload(args: {
 export async function shouldProcessInboundWebhook(args: {
   botAccountId?: number;
   isDirectRoom: (roomId: number) => Promise<boolean>;
+  isReplyParentAuthoredByBot?: (options: {
+    messageId: string;
+    roomId: number;
+  }) => Promise<boolean>;
   payload: ChatworkWebhookPayload;
   treatRoomMessagesAsMentions?: boolean;
 }): Promise<boolean> {
@@ -57,8 +61,18 @@ export async function shouldProcessInboundWebhook(args: {
     return true;
   }
 
-  if (parseReplyNotation(args.payload.webhook_event.body)) {
-    return true;
+  const replyNotation = parseReplyNotation(args.payload.webhook_event.body);
+  if (
+    replyNotation &&
+    replyNotation.roomId === args.payload.webhook_event.room_id
+  ) {
+    if (!args.botAccountId || !args.isReplyParentAuthoredByBot) {
+      return false;
+    }
+    return args.isReplyParentAuthoredByBot({
+      messageId: replyNotation.messageId,
+      roomId: replyNotation.roomId,
+    });
   }
 
   if (args.payload.webhook_event_type === "message_created") {

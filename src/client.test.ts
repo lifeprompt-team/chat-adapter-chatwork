@@ -163,6 +163,8 @@ describe("ChatworkClient", () => {
   });
 
   it("retries 429 responses after retryAfter seconds", async () => {
+    vi.useFakeTimers({ now: new Date("2024-06-01T00:00:00Z") });
+    try {
     const sleep = vi.fn(async () => undefined);
     const fetchMock = vi
       .fn()
@@ -190,9 +192,14 @@ describe("ChatworkClient", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledWith(2000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("throws after exhausting rate limit retries", async () => {
+    vi.useFakeTimers({ now: new Date("2024-06-01T00:00:00Z") });
+    try {
     const sleep = vi.fn(async () => undefined);
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ errors: ["too many requests"] }), {
@@ -217,6 +224,9 @@ describe("ChatworkClient", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("loads room files with optional download URLs", async () => {

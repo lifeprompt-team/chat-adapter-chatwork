@@ -182,6 +182,17 @@ describe("ChatworkAdapter", () => {
           JSON.stringify([{ account_id: 123, name: "Alice", room_id: 456 }]),
           { status: 200 }
         ),
+      "/rooms/456/messages/200": () =>
+        new Response(
+          JSON.stringify({
+            account: { account_id: 999, avatar_image_url: "", name: "Bot" },
+            body: "[rp aid=999 to=456-100] bot reply",
+            message_id: "200",
+            send_time: 2,
+            update_time: 0,
+          }),
+          { status: 200 }
+        ),
       "/rooms/456/messages?force=1": () =>
         new Response(
           JSON.stringify([
@@ -193,13 +204,18 @@ describe("ChatworkAdapter", () => {
               update_time: 0,
             },
             {
-              account: { account_id: 2, name: "Bob" },
-              body: "[rp aid=1 to=456-100] bot reply",
+              account: { account_id: 999, name: "Bot" },
+              body: "[rp aid=999 to=456-100] bot reply",
               message_id: "200",
               send_time: 2,
               update_time: 0,
             },
           ]),
+          { status: 200 }
+        ),
+      "/rooms/456": () =>
+        new Response(
+          JSON.stringify({ name: "Group", room_id: 456, type: "group" }),
           { status: 200 }
         ),
     });
@@ -209,7 +225,7 @@ describe("ChatworkAdapter", () => {
     const body = JSON.stringify({
       webhook_event: {
         account_id: 123,
-        body: "[rp aid=2 to=456-200] follow-up",
+        body: "[rp aid=123 to=456-200] follow-up",
         message_id: "300",
         room_id: 456,
         send_time: 1498028125,
@@ -302,6 +318,17 @@ describe("ChatworkAdapter", () => {
           JSON.stringify([{ account_id: 123, name: "Alice", room_id: 456 }]),
           { status: 200 }
         ),
+      "/rooms/456/messages/m1": () =>
+        new Response(
+          JSON.stringify({
+            account: { account_id: 999, avatar_image_url: "", name: "Bot" },
+            body: "bot message",
+            message_id: "m1",
+            send_time: 1,
+            update_time: 0,
+          }),
+          { status: 200 }
+        ),
       "/rooms/456": () =>
         new Response(
           JSON.stringify({ name: "Group", room_id: 456, type: "group" }),
@@ -314,7 +341,7 @@ describe("ChatworkAdapter", () => {
     const body = JSON.stringify({
       webhook_event: {
         account_id: 123,
-        body: "[rp aid=999 to=456-m1]\nanswer",
+        body: "[rp aid=123 to=456-m1]\nanswer",
         message_id: "m2",
         room_id: 456,
         send_time: 1498028125,
@@ -497,6 +524,17 @@ describe("ChatworkAdapter", () => {
     const processMessage = vi.fn();
     const fetch = createFetchMock({
       "/contacts": () => new Response(null, { status: 204 }),
+      "/rooms/456/messages/m1": () =>
+        new Response(
+          JSON.stringify({
+            account: { account_id: 999, avatar_image_url: "", name: "Bot" },
+            body: "bot message",
+            message_id: "m1",
+            send_time: 1,
+            update_time: 0,
+          }),
+          { status: 200 }
+        ),
       "/rooms/456/members": () =>
         new Response(
           JSON.stringify([
@@ -517,7 +555,7 @@ describe("ChatworkAdapter", () => {
     const body = JSON.stringify({
       webhook_event: {
         account_id: 123,
-        body: "[rp aid=999 to=456-m1]\nanswer",
+        body: "[rp aid=123 to=456-m1]\nanswer",
         message_id: "m2",
         room_id: 456,
         send_time: 1498028125,

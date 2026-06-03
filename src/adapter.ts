@@ -120,6 +120,10 @@ export class ChatworkAdapter
     return String(this.decodeThreadId(threadId).roomId);
   }
 
+  /**
+   * DM ルームかどうか。`roomTypeById` または contacts キャッシュに依存する。
+   * キャッシュ未設定のルームは `false` を返す（`openDM` / `fetchThread` 後に正しく判定できる）。
+   */
   isDM(threadId: string): boolean {
     const decoded = this.decodeThreadId(threadId);
     const cachedType = this.roomTypeById.get(decoded.roomId);
@@ -721,12 +725,34 @@ export class ChatworkAdapter
     }
   }
 
+  private async isReplyParentAuthoredByBot(options: {
+    messageId: string;
+    roomId: number;
+  }): Promise<boolean> {
+    if (!this.botAccountId) {
+      return false;
+    }
+
+    try {
+      const message = await this.client.getRoomMessage({
+        messageId: options.messageId,
+        roomId: options.roomId,
+      });
+      return message.account.account_id === this.botAccountId;
+    } catch (error) {
+      this.logger.warn("Failed to fetch Chatwork reply parent message", error);
+      return false;
+    }
+  }
+
   private async shouldProcessPayload(
     payload: ChatworkWebhookPayload
   ): Promise<boolean> {
     return shouldProcessInboundWebhook({
       botAccountId: this.botAccountId,
       isDirectRoom: (roomId) => this.isDirectRoom(roomId),
+      isReplyParentAuthoredByBot: (options) =>
+        this.isReplyParentAuthoredByBot(options),
       payload,
       treatRoomMessagesAsMentions: this.config.treatRoomMessagesAsMentions,
     });
