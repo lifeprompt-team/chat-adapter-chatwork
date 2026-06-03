@@ -3,6 +3,7 @@ import type { Logger } from "chat";
 export interface ChatworkAdapterConfig {
   apiToken: string;
   botAccountId?: number;
+  fetch?: typeof fetch;
   logger?: Logger;
   selfUnread?: boolean;
   treatRoomMessagesAsMentions?: boolean;
@@ -13,6 +14,8 @@ export interface ChatworkAdapterConfig {
 export interface ChatworkClientConfig {
   apiToken: string;
   fetch?: typeof fetch;
+  maxRateLimitRetries?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
 
 export interface ChatworkThreadId {
@@ -87,4 +90,40 @@ export interface ChatworkMe {
 
 export interface ChatworkPostMessageResponse {
   message_id: string;
+}
+
+export interface ChatworkContact {
+  account_id: number;
+  avatar_image_url?: string;
+  chatwork_id?: string;
+  department?: string;
+  name: string;
+  organization_id?: number;
+  organization_name?: string;
+  room_id: number;
+}
+
+export interface ChatworkRoomMember {
+  account_id: number;
+  avatar_image_url?: string;
+  chatwork_id?: string;
+  department?: string;
+  name: string;
+  organization_id?: number;
+  organization_name?: string;
+  role: string;
+}
+
+export interface ChatworkRoomFile {
+  account: ChatworkAccount;
+  download_url?: string;
+  file_id: number;
+  filename: string;
+  filesize: number;
+  message_id: string;
+  upload_time: number;
+}
+
+export interface ChatworkUploadFileResponse {
+  file_id: number;
 }

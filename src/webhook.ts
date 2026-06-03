@@ -1,4 +1,4 @@
-import { ValidationError } from "@chat-adapter/shared";
+import { AuthenticationError, ValidationError } from "@chat-adapter/shared";
 import { verifyChatworkSignature } from "./signature";
 import type { ChatworkWebhookPayload } from "./types";
 
@@ -18,7 +18,8 @@ export async function verifyChatworkWebhook(
     url.searchParams.get("chatwork_webhook_signature");
 
   if (!verifyChatworkSignature(rawBody, webhookToken, signature)) {
-    throw new UnauthorizedChatworkWebhookError(
+    throw new AuthenticationError(
+      "chatwork",
       "Invalid Chatwork webhook signature"
     );
   }
@@ -32,5 +33,3 @@ export async function verifyChatworkWebhook(
     throw new ValidationError("chatwork", "Invalid Chatwork webhook JSON");
   }
 }
-
-export class UnauthorizedChatworkWebhookError extends Error {}

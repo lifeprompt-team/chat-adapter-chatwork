@@ -10,6 +10,17 @@ import {
 
 const ADAPTER_NAME = "chatwork";
 
+export function isAdapterRateLimitError(
+  error: unknown
+): error is AdapterRateLimitError {
+  return (
+    error instanceof AdapterRateLimitError ||
+    (error instanceof AdapterError &&
+      error.code === "RATE_LIMITED" &&
+      error.adapter === ADAPTER_NAME)
+  );
+}
+
 export async function mapChatworkResponseError(
   response: Response,
   resourceId?: string

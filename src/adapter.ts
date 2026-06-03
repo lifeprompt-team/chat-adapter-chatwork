@@ -1,12 +1,13 @@
 import {
+  AuthenticationError,
   extractFiles,
+  ResourceNotFoundError,
   ValidationError,
 } from "@chat-adapter/shared";
 import {
   ConsoleLogger,
   Message,
   NotImplementedError,
-  parseMarkdown,
   type Adapter,
   type AdapterPostableMessage,
   type ChatInstance,
@@ -17,27 +18,51 @@ import {
   type Logger,
   type RawMessage,
   type ThreadInfo,
+  type UserInfo,
   type WebhookOptions,
 } from "chat";
+import { resolveInboundAttachments } from "./attachments";
+import { MAX_FILE_BYTES, readBlobSize, toUploadBlob } from "./blob";
 import { ChatworkClient } from "./client";
 import { ChatworkFormatConverter } from "./format-converter";
-import { hasToNotation, renderReplyNotation } from "./notation";
+import {
+  getWebhookAuthorAccountId,
+  isWebhookMentionPayload,
+  shouldProcessInboundWebhook,
+} from "./inbound-webhook-filter";
+import {
+  hasToNotation,
+  parseReplyNotation,
+  renderReplyNotation,
+} from "./notation";
+import {
+  collectReplyChainForThreadAnchor,
+  indexChatworkRoomMessagesById,
+  resolveReplyChainRootMessageId,
+} from "./reply-chain";
 import { decodeThreadId, encodeThreadId } from "./thread-id";
 import type {
   ChatworkAdapterConfig,
-  ChatworkMessageCreatedEvent,
-  ChatworkMentionToMeEvent,
+  ChatworkContact,
   ChatworkPostMessageResponse,
+  ChatworkRoomMember,
   ChatworkRoomMessage,
   ChatworkThreadId,
   ChatworkWebhookPayload,
 } from "./types";
-import {
-  UnauthorizedChatworkWebhookError,
-  verifyChatworkWebhook,
-} from "./webhook";
+import { verifyChatworkWebhook, type VerifiedChatworkWebhook } from "./webhook";
 
 const MAX_BODY_LENGTH = 65535;
+const CONTACTS_CACHE_TTL_MS = 60_000;
+const ROOM_MEMBERS_CACHE_TTL_MS = 60_000;
+const ROOM_MESSAGES_CACHE_TTL_MS = 60_000;
+const ROOM_TYPE_CACHE_TTL_MS = 10 * 60_000;
+const UNKNOWN_ROOM_TYPE = "unknown";
+
+type ChatworkPostReference = {
+  id: string;
+  threadId: string;
+};
 
 export class ChatworkAdapter
   implements Adapter<ChatworkThreadId, unknown>
@@ -47,10 +72,24 @@ export class ChatworkAdapter
 
   private botAccountId?: number;
   private chat: ChatInstance | null = null;
+  private contactsCache: ChatworkContact[] | null = null;
+  private contactsCacheExpiresAt = 0;
+  private readonly roomMembersCacheById = new Map<
+    number,
+    { expiresAt: number; members: ChatworkRoomMember[] }
+  >();
+  private readonly roomMessagesCacheById = new Map<
+    number,
+    { expiresAt: number; messages: ChatworkRoomMessage[] }
+  >();
   private readonly client: ChatworkClient;
   private readonly config: ChatworkAdapterConfig;
   private logger: Logger;
   private readonly converter = new ChatworkFormatConverter();
+  private readonly roomTypeById = new Map<
+    number,
+    { expiresAt: number; type: string }
+  >();
 
   constructor(config: ChatworkAdapterConfig) {
     validateConfig(config);
@@ -58,7 +97,14 @@ export class ChatworkAdapter
     this.botAccountId = config.botAccountId;
     this.userName = config.userName ?? "chatwork-bot";
     this.logger = config.logger ?? new ConsoleLogger();
-    this.client = new ChatworkClient({ apiToken: config.apiToken });
+    this.client = new ChatworkClient({
+      apiToken: config.apiToken,
+      fetch: config.fetch,
+    });
+  }
+
+  get botUserId(): string | undefined {
+    return this.botAccountId ? String(this.botAccountId) : undefined;
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
@@ -83,11 +129,83 @@ export class ChatworkAdapter
     return String(this.decodeThreadId(threadId).roomId);
   }
 
+  /**
+   * DM ルームかどうか。`roomTypeById` または contacts キャッシュに依存する。
+   * キャッシュ未設定のルームは `false` を返す（`openDM` / `fetchThread` 後に正しく判定できる）。
+   */
+  isDM(threadId: string): boolean {
+    const decoded = this.decodeThreadId(threadId);
+    const cachedType = this.readCachedRoomType(decoded.roomId);
+    if (cachedType !== undefined) {
+      return cachedType === "direct";
+    }
+
+    if (
+      this.contactsCache?.some((contact) => contact.room_id === decoded.roomId)
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  async openDM(userId: string): Promise<string> {
+    const accountId = Number(userId);
+    if (!Number.isInteger(accountId)) {
+      throw new ValidationError("chatwork", `Invalid Chatwork account ID: ${userId}`);
+    }
+
+    const contacts = await this.getContactsCached();
+    const contact = contacts.find((entry) => entry.account_id === accountId);
+    if (!contact?.room_id) {
+      throw new ResourceNotFoundError(
+        "chatwork",
+        "Chatwork direct room",
+        userId
+      );
+    }
+
+    this.cacheRoomType({ roomId: contact.room_id, type: "direct" });
+    return encodeThreadId({ roomId: contact.room_id });
+  }
+
+  async getUser(userId: string): Promise<UserInfo | null> {
+    const accountId = Number(userId);
+    if (!Number.isInteger(accountId)) {
+      return null;
+    }
+
+    const contacts = await this.getContactsCached();
+    const contact = contacts.find((entry) => entry.account_id === accountId);
+    if (!contact) {
+      return null;
+    }
+
+    return {
+      avatarUrl: contact.avatar_image_url,
+      fullName: contact.name,
+      isBot: false,
+      userId: String(accountId),
+      userName: contact.name,
+    };
+  }
+
+  async onThreadSubscribe(threadId: string): Promise<void> {
+    const decoded = this.decodeThreadId(threadId);
+    this.logger.info(
+      "Chatwork thread subscribed. Ensure room webhook (message_created) is configured for subscribed follow-ups.",
+      {
+        roomId: decoded.roomId,
+        threadId,
+      }
+    );
+  }
+
   async handleWebhook(
     request: Request,
     options?: WebhookOptions
   ): Promise<Response> {
-    let verified;
+    let verified: VerifiedChatworkWebhook;
 
     try {
       verified = await verifyChatworkWebhook(
@@ -95,7 +213,7 @@ export class ChatworkAdapter
         this.config.webhookToken
       );
     } catch (error) {
-      if (error instanceof UnauthorizedChatworkWebhookError) {
+      if (error instanceof AuthenticationError) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -113,11 +231,15 @@ export class ChatworkAdapter
       return new Response("OK", { status: 200 });
     }
 
-    if (!this.shouldProcessPayload(payload)) {
+    if (!(await this.shouldProcessPayload(payload))) {
       return new Response("OK", { status: 200 });
     }
 
-    const message = this.parseMessage(payload);
+    const message = await this.normalizeDirectDmThreadId(
+      await this.normalizeInboundThreadId(
+        await this.enrichInboundMessage(this.parseMessage(payload))
+      )
+    );
     this.requireChat().processMessage(this, message.threadId, message, options);
 
     return new Response("OK", { status: 200 });
@@ -129,7 +251,7 @@ export class ChatworkAdapter
     }
 
     const event = raw.webhook_event;
-    const accountId = getAuthorAccountId(raw);
+    const accountId = getWebhookAuthorAccountId(raw);
     const threadId = this.encodeThreadId({
       messageId: event.message_id,
       replyToAccountId: accountId,
@@ -138,14 +260,10 @@ export class ChatworkAdapter
 
     return new Message<unknown>({
       attachments: [],
-      author: {
-        fullName: String(accountId),
-        isBot: "unknown",
-        isMe: false,
-        userId: String(accountId),
-        userName: String(accountId),
-      },
-      formatted: parseMarkdown(event.body),
+      author: this.buildAuthor({
+        accountId,
+      }),
+      formatted: this.converter.toAst(event.body),
       id: event.message_id,
       isMention: this.isMentionPayload(raw),
       metadata: {
@@ -167,31 +285,111 @@ export class ChatworkAdapter
     message: AdapterPostableMessage
   ): Promise<RawMessage<ChatworkPostMessageResponse>> {
     const files = extractFiles(message);
-    if (files.length > 0) {
-      throw new ValidationError(
-        "chatwork",
-        "Chatwork file uploads are not supported yet"
-      );
-    }
-
     const decoded = this.decodeThreadId(threadId);
     const text = await this.renderOutgoingBody(decoded, message);
-    validateBodyLength(text);
 
-    const raw = await this.client.postRoomMessage({
-      body: text,
-      roomId: decoded.roomId,
-      selfUnread: this.config.selfUnread,
-    });
+    if (files.length === 0) {
+      validateBodyLength(text);
+      const raw = await this.client.postRoomMessage({
+        body: text,
+        roomId: decoded.roomId,
+        selfUnread: this.config.selfUnread,
+      });
+
+      return {
+        id: raw.message_id,
+        raw,
+        threadId: this.encodeReplyThreadId({
+          decoded,
+        }),
+      };
+    }
+
+    let lastPostReference: ChatworkPostReference | undefined;
+
+    for (const [index, file] of files.entries()) {
+      validateUploadSize({ file });
+      const uploadMessage = index === 0 && text.length > 0 ? text : undefined;
+      if (uploadMessage) {
+        validateBodyLength(uploadMessage);
+      }
+
+      const upload = await this.client.uploadRoomFile({
+        file: toUploadBlob({
+          data: file.data,
+          mimeType: file.mimeType,
+        }),
+        filename: file.filename,
+        message: uploadMessage,
+        mimeType: file.mimeType,
+        roomId: decoded.roomId,
+      });
+
+      if (index === files.length - 1) {
+        lastPostReference = await this.resolveUploadedFilePostReference({
+          decoded,
+          fileId: upload.file_id,
+          roomId: decoded.roomId,
+        });
+      }
+    }
+
+    if (!lastPostReference) {
+      throw new ValidationError("chatwork", "Chatwork file upload did not return a message ID");
+    }
 
     return {
-      id: raw.message_id,
-      raw,
-      threadId: this.encodeThreadId({
-        messageId: raw.message_id,
-        roomId: decoded.roomId,
-      }),
+      id: lastPostReference.id,
+      raw: { message_id: lastPostReference.id },
+      threadId: lastPostReference.threadId,
     };
+  }
+
+  private encodeReplyThreadId(args: { decoded: ChatworkThreadId }): string {
+    if (!args.decoded.messageId) {
+      return this.encodeThreadId({
+        roomId: args.decoded.roomId,
+      });
+    }
+    return this.encodeThreadId({
+      messageId: args.decoded.messageId,
+      replyToAccountId: args.decoded.replyToAccountId,
+      roomId: args.decoded.roomId,
+    });
+  }
+
+  private async resolveUploadedFilePostReference(args: {
+    decoded: ChatworkThreadId;
+    fileId: number;
+    roomId: number;
+  }): Promise<ChatworkPostReference> {
+    try {
+      const fileInfo = await this.client.getRoomFile({
+        fileId: args.fileId,
+        roomId: args.roomId,
+      });
+      return {
+        id: fileInfo.message_id,
+        threadId: this.encodeReplyThreadId({
+          decoded: args.decoded,
+        }),
+      };
+    } catch (error) {
+      this.logger.warn(
+        "Failed to fetch Chatwork uploaded file metadata; using file id as post reference",
+        {
+          error,
+          fileId: args.fileId,
+          roomId: args.roomId,
+        }
+      );
+      return {
+        id: `file:${args.fileId}`,
+        threadId: this.encodeReplyThreadId({
+          decoded: args.decoded,
+        }),
+      };
+    }
   }
 
   async editMessage(
@@ -199,8 +397,16 @@ export class ChatworkAdapter
     messageId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage<ChatworkPostMessageResponse>> {
+    const files = extractFiles(message);
+    if (files.length > 0) {
+      throw new ValidationError(
+        "chatwork",
+        "Chatwork does not support editing messages with file uploads"
+      );
+    }
+
     const decoded = this.decodeThreadId(threadId);
-    const body = this.converter.renderPostable(message);
+    const body = await this.renderOutgoingBody(decoded, message);
     validateBodyLength(body);
 
     const raw = await this.client.editRoomMessage({
@@ -234,7 +440,9 @@ export class ChatworkAdapter
       roomId: decoded.roomId,
     });
 
-    return this.messageFromRoomMessage(raw, decoded.roomId);
+    return this.enrichInboundMessage(
+      this.messageFromRoomMessage(raw, decoded.roomId)
+    );
   }
 
   async fetchMessages(
@@ -242,11 +450,23 @@ export class ChatworkAdapter
     _options?: FetchOptions
   ): Promise<FetchResult<ChatworkRoomMessage>> {
     const decoded = this.decodeThreadId(threadId);
-    const messages = await this.client.getRoomMessages(decoded.roomId);
+    const roomMessages = await this.getRoomMessagesCached(decoded.roomId);
+    const selectedMessages =
+      decoded.messageId === undefined
+        ? roomMessages
+        : collectReplyChainForThreadAnchor({
+            anchorMessageId: decoded.messageId,
+            messagesById: indexChatworkRoomMessagesById({ messages: roomMessages }),
+            roomId: decoded.roomId,
+          });
 
     return {
-      messages: messages.map((message) =>
-        this.messageFromRoomMessage(message, decoded.roomId)
+      messages: await Promise.all(
+        selectedMessages.map(async (message) =>
+          this.enrichInboundMessage(
+            this.messageFromRoomMessage(message, decoded.roomId)
+          )
+        )
       ),
     };
   }
@@ -254,6 +474,7 @@ export class ChatworkAdapter
   async fetchThread(threadId: string): Promise<ThreadInfo> {
     const decoded = this.decodeThreadId(threadId);
     const room = await this.client.getRoom(decoded.roomId);
+    this.cacheRoomType({ roomId: decoded.roomId, type: room.type });
 
     return {
       channelId: String(decoded.roomId),
@@ -299,6 +520,254 @@ export class ChatworkAdapter
     );
   }
 
+  private async resolveRoomType(roomId: number): Promise<string> {
+    const cached = this.readCachedRoomType(roomId);
+    if (cached) {
+      return cached;
+    }
+
+    const room = await this.client.getRoom(roomId);
+    const roomType = room.type ?? UNKNOWN_ROOM_TYPE;
+    this.cacheRoomType({
+      roomId,
+      type: roomType,
+    });
+    return roomType;
+  }
+
+  /** DM はメッセージ単位 threadId ではなくルーム単位に揃える（AgentLog 継続用） */
+  private async normalizeDirectDmThreadId<T>(
+    message: Message<T>
+  ): Promise<Message<T>> {
+    const decoded = this.decodeThreadId(message.threadId);
+    if (!decoded.messageId) {
+      return message;
+    }
+
+    const roomType = await this.resolveRoomType(decoded.roomId);
+    if (roomType !== "direct") {
+      return message;
+    }
+
+    const stableThreadId = this.encodeThreadId({
+      roomId: decoded.roomId,
+    });
+    if (stableThreadId === message.threadId) {
+      return message;
+    }
+
+    return new Message<T>({
+      attachments: message.attachments,
+      author: message.author,
+      formatted: message.formatted,
+      id: message.id,
+      isMention: message.isMention,
+      metadata: message.metadata,
+      raw: message.raw,
+      text: message.text,
+      threadId: stableThreadId,
+    });
+  }
+
+  private async normalizeInboundThreadId<T>(
+    message: Message<T>
+  ): Promise<Message<T>> {
+    const decoded = this.decodeThreadId(message.threadId);
+    if (!decoded.messageId) {
+      return message;
+    }
+
+    const replyNotation = parseReplyNotation(message.text);
+    if (!replyNotation || replyNotation.roomId !== decoded.roomId) {
+      return message;
+    }
+
+    try {
+      const roomMessages = await this.getRoomMessagesCached(decoded.roomId);
+      const rootMessageId = resolveReplyChainRootMessageId({
+        messageId: decoded.messageId,
+        messageText: message.text,
+        messagesById: indexChatworkRoomMessagesById({ messages: roomMessages }),
+        roomId: decoded.roomId,
+      });
+      const stableThreadId = this.encodeThreadId({
+        messageId: rootMessageId,
+        replyToAccountId: decoded.replyToAccountId,
+        roomId: decoded.roomId,
+      });
+      if (stableThreadId === message.threadId) {
+        return message;
+      }
+
+      return new Message<T>({
+        attachments: message.attachments,
+        author: message.author,
+        formatted: message.formatted,
+        id: message.id,
+        isMention: message.isMention,
+        metadata: message.metadata,
+        raw: message.raw,
+        text: message.text,
+        threadId: stableThreadId,
+      });
+    } catch (error) {
+      this.logger.warn(
+        "Failed to normalize Chatwork inbound thread id; using message-scoped id",
+        error
+      );
+      return message;
+    }
+  }
+
+  private async enrichInboundMessage<T>(
+    message: Message<T>
+  ): Promise<Message<T>> {
+    const decoded = this.decodeThreadId(message.threadId);
+    const attachments = await resolveInboundAttachments({
+      body: message.text,
+      client: this.client,
+      fetch: this.config.fetch,
+      logger: this.logger,
+      roomId: decoded.roomId,
+    });
+    const author = await this.resolveAuthor({
+      accountId: Number(message.author.userId),
+      fallbackName: message.author.userName,
+      roomId: decoded.roomId,
+    });
+
+    return new Message<T>({
+      attachments,
+      author,
+      formatted: message.formatted,
+      id: message.id,
+      isMention: message.isMention,
+      metadata: message.metadata,
+      raw: message.raw,
+      text: message.text,
+      threadId: message.threadId,
+    });
+  }
+
+  private async resolveAuthor(args: {
+    accountId: number;
+    fallbackName?: string;
+    roomId: number;
+  }): Promise<Message<unknown>["author"]> {
+    if (!Number.isInteger(args.accountId)) {
+      return {
+        fullName: args.fallbackName ?? "unknown",
+        isBot: "unknown",
+        isMe: false,
+        userId: String(args.accountId),
+        userName: args.fallbackName ?? "unknown",
+      };
+    }
+
+    const user = await this.getUser(String(args.accountId));
+    if (user) {
+      return {
+        fullName: user.fullName,
+        isBot: false,
+        isMe: this.botAccountId === args.accountId,
+        userId: String(args.accountId),
+        userName: user.userName,
+      };
+    }
+
+    const members = await this.getRoomMembersCached({ roomId: args.roomId });
+    const member = members.find((entry) => entry.account_id === args.accountId);
+    const displayName =
+      member?.name ?? args.fallbackName ?? String(args.accountId);
+
+    return {
+      fullName: displayName,
+      isBot: false,
+      isMe: this.botAccountId === args.accountId,
+      userId: String(args.accountId),
+      userName: displayName,
+    };
+  }
+
+  private buildAuthor(args: { accountId: number }): Message<unknown>["author"] {
+    return {
+      fullName: String(args.accountId),
+      isBot: "unknown",
+      isMe: this.botAccountId === args.accountId,
+      userId: String(args.accountId),
+      userName: String(args.accountId),
+    };
+  }
+
+  private cacheRoomType(args: { roomId: number; type?: string }): void {
+    this.roomTypeById.set(args.roomId, {
+      expiresAt: Date.now() + ROOM_TYPE_CACHE_TTL_MS,
+      type: args.type ?? UNKNOWN_ROOM_TYPE,
+    });
+  }
+
+  private readCachedRoomType(roomId: number): string | undefined {
+    const cached = this.roomTypeById.get(roomId);
+    if (!cached || Date.now() >= cached.expiresAt) {
+      this.roomTypeById.delete(roomId);
+      return undefined;
+    }
+    return cached.type;
+  }
+
+  private async getRoomMessagesCached(
+    roomId: number
+  ): Promise<ChatworkRoomMessage[]> {
+    const cached = this.roomMessagesCacheById.get(roomId);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.messages;
+    }
+
+    const messages = await this.client.getRoomMessages(roomId);
+    this.roomMessagesCacheById.set(roomId, {
+      expiresAt: Date.now() + ROOM_MESSAGES_CACHE_TTL_MS,
+      messages,
+    });
+    return messages;
+  }
+
+  private async getContactsCached(): Promise<ChatworkContact[]> {
+    if (this.contactsCache && Date.now() < this.contactsCacheExpiresAt) {
+      return this.contactsCache;
+    }
+
+    this.contactsCache = (await this.client.getContacts()) ?? [];
+    this.contactsCacheExpiresAt = Date.now() + CONTACTS_CACHE_TTL_MS;
+    return this.contactsCache;
+  }
+
+  private async getRoomMembersCached(args: {
+    roomId: number;
+  }): Promise<ChatworkRoomMember[]> {
+    const cached = this.roomMembersCacheById.get(args.roomId);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.members;
+    }
+
+    const members = (await this.client.getRoomMembers(args.roomId)) ?? [];
+    this.roomMembersCacheById.set(args.roomId, {
+      expiresAt: Date.now() + ROOM_MEMBERS_CACHE_TTL_MS,
+      members,
+    });
+    return members;
+  }
+
+  private async isDirectRoom(roomId: number): Promise<boolean> {
+    const cachedType = this.readCachedRoomType(roomId);
+    if (cachedType !== undefined) {
+      return cachedType === "direct";
+    }
+
+    const room = await this.client.getRoom(roomId);
+    this.cacheRoomType({ roomId, type: room.type });
+    return room.type === "direct";
+  }
+
   private async renderOutgoingBody(
     thread: ChatworkThreadId,
     message: AdapterPostableMessage
@@ -310,10 +779,13 @@ export class ChatworkAdapter
 
     const accountId = await this.resolveReplyToAccountId(thread);
     if (!accountId) {
-      this.logger.warn("Could not resolve Chatwork reply target account ID", {
-        messageId: thread.messageId,
-        roomId: thread.roomId,
-      });
+      this.logger.warn(
+        "Could not resolve Chatwork reply target; sending body without reply notation",
+        {
+          messageId: thread.messageId,
+          roomId: thread.roomId,
+        }
+      );
       return body;
     }
 
@@ -347,30 +819,45 @@ export class ChatworkAdapter
     }
   }
 
-  private shouldProcessPayload(payload: ChatworkWebhookPayload): boolean {
-    const accountId = getAuthorAccountId(payload);
-    if (this.botAccountId && accountId === this.botAccountId) {
+  private async isReplyParentAuthoredByBot(options: {
+    messageId: string;
+    roomId: number;
+  }): Promise<boolean> {
+    if (!this.botAccountId) {
       return false;
     }
 
-    return payload.webhook_event_type === "mention_to_me"
-      ? true
-      : this.isMentionPayload(payload);
+    try {
+      const message = await this.client.getRoomMessage({
+        messageId: options.messageId,
+        roomId: options.roomId,
+      });
+      return message.account.account_id === this.botAccountId;
+    } catch (error) {
+      this.logger.warn("Failed to fetch Chatwork reply parent message", error);
+      return false;
+    }
+  }
+
+  private async shouldProcessPayload(
+    payload: ChatworkWebhookPayload
+  ): Promise<boolean> {
+    return shouldProcessInboundWebhook({
+      botAccountId: this.botAccountId,
+      isDirectRoom: (roomId) => this.isDirectRoom(roomId),
+      isReplyParentAuthoredByBot: (options) =>
+        this.isReplyParentAuthoredByBot(options),
+      payload,
+      treatRoomMessagesAsMentions: this.config.treatRoomMessagesAsMentions,
+    });
   }
 
   private isMentionPayload(payload: ChatworkWebhookPayload): boolean {
-    if (payload.webhook_event_type === "mention_to_me") {
-      return true;
-    }
-
-    if (this.config.treatRoomMessagesAsMentions === true) {
-      return true;
-    }
-
-    return Boolean(
-      this.botAccountId &&
-        hasToNotation(payload.webhook_event.body, this.botAccountId)
-    );
+    return isWebhookMentionPayload({
+      botAccountId: this.botAccountId,
+      payload,
+      treatRoomMessagesAsMentions: this.config.treatRoomMessagesAsMentions,
+    });
   }
 
   private messageFromRoomMessage(
@@ -386,7 +873,7 @@ export class ChatworkAdapter
         userId: String(raw.account.account_id),
         userName: raw.account.name,
       },
-      formatted: parseMarkdown(raw.body),
+      formatted: this.converter.toAst(raw.body),
       id: raw.message_id,
       isMention: Boolean(
         this.botAccountId && hasToNotation(raw.body, this.botAccountId)
@@ -441,10 +928,16 @@ function validateBodyLength(body: string): void {
   }
 }
 
-function getAuthorAccountId(payload: ChatworkWebhookPayload): number {
-  return payload.webhook_event_type === "mention_to_me"
-    ? (payload.webhook_event as ChatworkMentionToMeEvent).from_account_id
-    : (payload.webhook_event as ChatworkMessageCreatedEvent).account_id;
+function validateUploadSize(args: {
+  file: { data: Blob | Buffer | ArrayBuffer; filename: string };
+}): void {
+  const size = readBlobSize({ data: args.file.data });
+  if (size > MAX_FILE_BYTES) {
+    throw new ValidationError(
+      "chatwork",
+      `Chatwork file uploads must be ${MAX_FILE_BYTES} bytes or fewer`
+    );
+  }
 }
 
 function isChatworkWebhookPayload(value: unknown): value is ChatworkWebhookPayload {

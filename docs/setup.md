@@ -49,13 +49,41 @@ Chatwork does not expose Slack-style native thread resources. The adapter repres
 ```text
 chatwork:{base64url(roomId)}
 chatwork:{base64url(roomId)}:{base64url(messageId)}
+chatwork:{base64url(roomId)}:{base64url(messageId)}:{base64url(replyToAccountId)}
 ```
 
-When a message ID is present, `postMessage()` tries to fetch the original message author and uses Chatwork reply notation:
+When a message ID is present, `postMessage()` prefixes the outgoing body with Chatwork reply notation. If `replyToAccountId` is present, the adapter skips the extra `getRoomMessage()` lookup.
 
 ```text
 [rp aid={accountId} to={roomId}-{messageId}]
 ```
+
+When `fetchMessages()` receives a message-scoped thread ID, it returns reply-chain ancestors only (not the anchor message). The result depends on Chatwork message history window size.
+
+## Subscribed follow-ups
+
+For direct messages and pending-style replies, configure room webhooks with `message_created` on the relevant room IDs.
+
+The adapter forwards these `message_created` events to Chat SDK:
+
+- direct room messages
+- messages containing reply notation (`[rp aid=...]`)
+
+After `thread.subscribe()`, the adapter logs a reminder to configure the room webhook for that room ID.
+
+## Attachments
+
+Inbound file messages include Chatwork download notation in the message body:
+
+```text
+[download:1466244790]file.pdf (54 KB)
+```
+
+The adapter resolves these into Chat SDK `attachments` with short-lived download URLs.
+
+Inbound downloads and outbound uploads both enforce a 5MB limit per file. When multiple files are posted in one call, only the first file carries the message caption.
+
+Outbound uploads use `POST /rooms/{room_id}/files` with a 5MB limit per file.
 
 ## Current feature scope
 
@@ -63,6 +91,10 @@ Supported:
 
 - `mention_to_me` events.
 - Opt-in `message_created` events.
+- Direct room follow-up messages.
+- Reply notation parsing and rendering.
+- `openDM()` and `getUser()`.
+- Inbound and outbound file attachments.
 - Text posting.
 - Message edit/delete.
 - Message and room fetching.
@@ -70,7 +102,6 @@ Supported:
 Not supported yet:
 
 - OAuth2 token flow.
-- Files and attachments.
 - Full Chatwork notation conversion.
 - Modals and ephemeral messages.
 - Typing indicators.

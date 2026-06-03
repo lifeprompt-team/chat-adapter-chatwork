@@ -19,6 +19,20 @@ describe("thread IDs", () => {
     });
   });
 
+  it("roundtrips a reply thread with reply target account id", () => {
+    const encoded = encodeThreadId({
+      messageId: "789:abc",
+      replyToAccountId: 11393505,
+      roomId: 123456,
+    });
+
+    expect(decodeThreadId(encoded)).toEqual({
+      messageId: "789:abc",
+      replyToAccountId: 11393505,
+      roomId: 123456,
+    });
+  });
+
   it("rejects invalid thread IDs", () => {
     expect(() => decodeThreadId("slack:MTIz")).toThrow();
     expect(() => decodeThreadId("chatwork:not-number")).toThrow();

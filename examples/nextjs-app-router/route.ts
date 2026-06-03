@@ -8,7 +8,7 @@ const chatwork = createChatworkAdapter({
 });
 
 const chat = new Chat({
-  adapters: [chatwork],
+  adapters: { chatwork },
 });
 
 export async function POST(request: Request) {
