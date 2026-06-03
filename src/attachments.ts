@@ -20,62 +20,6 @@ export function extractDownloadFileIds(args: { body: string }): number[] {
   return fileIds;
 }
 
-function inferAttachmentType(args: {
-  filename: string;
-  mimeType?: string;
-}): Attachment["type"] {
-  const mimeType = args.mimeType?.toLowerCase() ?? "";
-  if (mimeType.startsWith("image/")) {
-    return "image";
-  }
-  if (mimeType.startsWith("video/")) {
-    return "video";
-  }
-  if (mimeType.startsWith("audio/")) {
-    return "audio";
-  }
-
-  const extension = args.filename.split(".").pop()?.toLowerCase();
-  if (extension && ["png", "jpg", "jpeg", "gif", "webp"].includes(extension)) {
-    return "image";
-  }
-  if (extension && ["mp4", "mov", "webm"].includes(extension)) {
-    return "video";
-  }
-  if (extension && ["mp3", "wav", "m4a", "ogg", "aac", "flac"].includes(extension)) {
-    return "audio";
-  }
-
-  return "file";
-}
-
-function inferMimeType(args: { filename: string }): string | undefined {
-  const extension = args.filename.split(".").pop()?.toLowerCase();
-  if (!extension) {
-    return undefined;
-  }
-
-  const mimeByExtension: Record<string, string> = {
-    aac: "audio/aac",
-    flac: "audio/flac",
-    gif: "image/gif",
-    jpeg: "image/jpeg",
-    jpg: "image/jpeg",
-    m4a: "audio/mp4",
-    mov: "video/quicktime",
-    mp3: "audio/mpeg",
-    mp4: "video/mp4",
-    ogg: "audio/ogg",
-    pdf: "application/pdf",
-    png: "image/png",
-    wav: "audio/wav",
-    webm: "video/webm",
-    webp: "image/webp",
-  };
-
-  return mimeByExtension[extension];
-}
-
 async function downloadFileData(args: {
   fetchImpl: typeof fetch;
   fileId: number;
@@ -106,56 +50,54 @@ async function downloadFileData(args: {
   return buffer;
 }
 
-async function resolveInboundAttachment(args: {
+function buildLazyInboundAttachment(args: {
   client: ChatworkClient;
   fetchImpl: typeof fetch;
   fileId: number;
   logger?: Logger;
   maxDownloadBytes: number;
   roomId: number;
-}): Promise<Attachment | null> {
-  try {
-    const file = await args.client.getRoomFile({
-      createDownloadUrl: true,
-      fileId: args.fileId,
-      roomId: args.roomId,
-    });
-    const mimeType = inferMimeType({ filename: file.filename });
-    const attachmentType = inferAttachmentType({
-      filename: file.filename,
-      mimeType,
-    });
+}): Attachment {
+  const loadRoomFile = async () => {
+    try {
+      return await args.client.getRoomFile({
+        createDownloadUrl: true,
+        fileId: args.fileId,
+        roomId: args.roomId,
+      });
+    } catch (error) {
+      args.logger?.warn("Failed to resolve Chatwork inbound attachment", {
+        error,
+        fileId: args.fileId,
+        roomId: args.roomId,
+      });
+      return null;
+    }
+  };
 
-    const downloadUrl = file.download_url;
+  return {
+    fetchData: async () => {
+      const file = await loadRoomFile();
+      if (!file?.download_url) {
+        throw new Error(
+          `Chatwork file ${args.fileId} in room ${args.roomId} is unavailable`
+        );
+      }
 
-    return {
-      fetchData: downloadUrl
-        ? async () =>
-            downloadFileData({
-              fetchImpl: args.fetchImpl,
-              fileId: args.fileId,
-              maxBytes: args.maxDownloadBytes,
-              url: downloadUrl,
-            })
-        : undefined,
-      fetchMetadata: {
-        chatworkFileId: String(file.file_id),
-        chatworkRoomId: String(args.roomId),
-      },
-      mimeType,
-      name: file.filename,
-      size: file.filesize,
-      type: attachmentType,
-      url: file.download_url,
-    };
-  } catch (error) {
-    args.logger?.warn("Failed to resolve Chatwork inbound attachment", {
-      error,
-      fileId: args.fileId,
-      roomId: args.roomId,
-    });
-    return null;
-  }
+      return downloadFileData({
+        fetchImpl: args.fetchImpl,
+        fileId: args.fileId,
+        maxBytes: args.maxDownloadBytes,
+        url: file.download_url,
+      });
+    },
+    fetchMetadata: {
+      chatworkFileId: String(args.fileId),
+      chatworkRoomId: String(args.roomId),
+    },
+    name: `file-${args.fileId}`,
+    type: "file",
+  };
 }
 
 export async function resolveInboundAttachments(args: {
@@ -174,18 +116,14 @@ export async function resolveInboundAttachments(args: {
   const fetchImpl = args.fetch ?? fetch;
   const maxDownloadBytes = args.maxDownloadBytes ?? MAX_FILE_BYTES;
 
-  const attachments = await Promise.all(
-    fileIds.map((fileId) =>
-      resolveInboundAttachment({
-        client: args.client,
-        fetchImpl,
-        fileId,
-        logger: args.logger,
-        maxDownloadBytes,
-        roomId: args.roomId,
-      })
-    )
+  return fileIds.map((fileId) =>
+    buildLazyInboundAttachment({
+      client: args.client,
+      fetchImpl,
+      fileId,
+      logger: args.logger,
+      maxDownloadBytes,
+      roomId: args.roomId,
+    })
   );
-
-  return attachments.filter((attachment): attachment is Attachment => attachment !== null);
 }
