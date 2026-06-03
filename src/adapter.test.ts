@@ -485,6 +485,27 @@ describe("ChatworkAdapter", () => {
     expect(result.id).toBe("m-upload");
   });
 
+  it("keeps uploaded files successful when uploaded file metadata is unavailable", async () => {
+    const fetch = createFetchMock({
+      "/rooms/456/files/42": () =>
+        new Response(JSON.stringify({ errors: ["not found"] }), { status: 404 }),
+      "/rooms/456/files": () =>
+        new Response(JSON.stringify({ file_id: 42 }), { status: 200 }),
+    });
+    const adapter = createAdapter({ fetch });
+
+    const result = await adapter.postMessage(
+      adapter.encodeThreadId({ roomId: 456 }),
+      {
+        files: [{ data: Buffer.from("hello"), filename: "hello.txt" }],
+        markdown: "attached",
+      }
+    );
+
+    expect(result.id).toBe("file:42");
+    expect(result.threadId).toBe(adapter.encodeThreadId({ roomId: 456 }));
+  });
+
   it("fetchMessages returns reply-chain ancestors when thread id includes message id", async () => {
     const fetch = createFetchMock({
       "/rooms/456/members": () =>

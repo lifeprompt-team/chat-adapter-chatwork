@@ -52,6 +52,11 @@ const CONTACTS_CACHE_TTL_MS = 60_000;
 const ROOM_MEMBERS_CACHE_TTL_MS = 60_000;
 const UNKNOWN_ROOM_TYPE = "unknown";
 
+type ChatworkPostReference = {
+  id: string;
+  threadId: string;
+};
+
 export class ChatworkAdapter
   implements Adapter<ChatworkThreadId, unknown>
 {
@@ -281,7 +286,7 @@ export class ChatworkAdapter
       };
     }
 
-    let lastMessageId: string | undefined;
+    let lastPostReference: ChatworkPostReference | undefined;
 
     for (const [index, file] of files.entries()) {
       validateUploadSize({ file });
@@ -301,25 +306,53 @@ export class ChatworkAdapter
         roomId: decoded.roomId,
       });
 
-      const fileInfo = await this.client.getRoomFile({
+      lastPostReference = await this.resolveUploadedFilePostReference({
         fileId: upload.file_id,
         roomId: decoded.roomId,
       });
-      lastMessageId = fileInfo.message_id;
     }
 
-    if (!lastMessageId) {
+    if (!lastPostReference) {
       throw new ValidationError("chatwork", "Chatwork file upload did not return a message ID");
     }
 
     return {
-      id: lastMessageId,
-      raw: { message_id: lastMessageId },
-      threadId: this.encodeThreadId({
-        messageId: lastMessageId,
-        roomId: decoded.roomId,
-      }),
+      id: lastPostReference.id,
+      raw: { message_id: lastPostReference.id },
+      threadId: lastPostReference.threadId,
     };
+  }
+
+  private async resolveUploadedFilePostReference(args: {
+    fileId: number;
+    roomId: number;
+  }): Promise<ChatworkPostReference> {
+    try {
+      const fileInfo = await this.client.getRoomFile({
+        fileId: args.fileId,
+        roomId: args.roomId,
+      });
+      return {
+        id: fileInfo.message_id,
+        threadId: this.encodeThreadId({
+          messageId: fileInfo.message_id,
+          roomId: args.roomId,
+        }),
+      };
+    } catch (error) {
+      this.logger.warn(
+        "Failed to fetch Chatwork uploaded file metadata; using file id as post reference",
+        {
+          error,
+          fileId: args.fileId,
+          roomId: args.roomId,
+        }
+      );
+      return {
+        id: `file:${args.fileId}`,
+        threadId: this.encodeThreadId({ roomId: args.roomId }),
+      };
+    }
   }
 
   async editMessage(
