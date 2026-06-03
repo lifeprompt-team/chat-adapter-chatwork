@@ -5,6 +5,7 @@ import {
   collectReplyChainFromMessages,
   DEFAULT_REPLY_CHAIN_MAX_DEPTH,
   indexChatworkRoomMessagesById,
+  resolveReplyChainRootMessageId,
 } from "./reply-chain";
 
 import type { ChatworkRoomMessage } from "./types";
@@ -133,5 +134,71 @@ describe("collectReplyChainForThreadAnchor", () => {
     });
 
     expect(chain.map((message) => message.message_id)).toEqual(["100", "200"]);
+  });
+});
+
+describe("resolveReplyChainRootMessageId", () => {
+  it("returns the current message id when there is no reply notation", () => {
+    expect(
+      resolveReplyChainRootMessageId({
+        messageId: "300",
+        messageText: "hello",
+        messagesById: new Map(),
+        roomId: 456,
+      })
+    ).toBe("300");
+  });
+
+  it("returns the root message id for a nested reply chain", () => {
+    const messages = [
+      createRoomMessage({
+        accountId: 1,
+        body: "root message",
+        messageId: "100",
+      }),
+      createRoomMessage({
+        accountId: 2,
+        body: "[rp aid=1 to=456-100] middle message",
+        messageId: "200",
+      }),
+    ];
+
+    expect(
+      resolveReplyChainRootMessageId({
+        messageId: "300",
+        messageText: "[rp aid=2 to=456-200] current reply",
+        messagesById: indexChatworkRoomMessagesById({ messages }),
+        roomId: 456,
+      })
+    ).toBe("100");
+  });
+
+  it("ボット返信の自己参照 [rp] からも初回メンションまで遡れる", () => {
+    const messages = [
+      createRoomMessage({
+        accountId: 1,
+        body: "[To:999] hello",
+        messageId: "2113948355263737856",
+      }),
+      createRoomMessage({
+        accountId: 999,
+        body: "[rp aid=999 to=437554432-2113948369201405952] bot reply",
+        messageId: "2113948369201405952",
+      }),
+      createRoomMessage({
+        accountId: 1,
+        body: "[rp aid=999 to=437554432-2113948369201405952] follow up",
+        messageId: "2113949814873141248",
+      }),
+    ];
+
+    expect(
+      resolveReplyChainRootMessageId({
+        messageId: "2113949814873141248",
+        messageText: messages[2]!.body,
+        messagesById: indexChatworkRoomMessagesById({ messages }),
+        roomId: 437554432,
+      })
+    ).toBe("2113948355263737856");
   });
 });

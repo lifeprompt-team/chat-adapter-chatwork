@@ -30,10 +30,15 @@ import {
   isWebhookMentionPayload,
   shouldProcessInboundWebhook,
 } from "./inbound-webhook-filter";
-import { hasToNotation, renderReplyNotation } from "./notation";
+import {
+  hasToNotation,
+  parseReplyNotation,
+  renderReplyNotation,
+} from "./notation";
 import {
   collectReplyChainForThreadAnchor,
   indexChatworkRoomMessagesById,
+  resolveReplyChainRootMessageId,
 } from "./reply-chain";
 import { decodeThreadId, encodeThreadId } from "./thread-id";
 import type {
@@ -217,8 +222,8 @@ export class ChatworkAdapter
       return new Response("OK", { status: 200 });
     }
 
-    const message = await this.enrichInboundMessage(
-      this.parseMessage(payload)
+    const message = await this.normalizeInboundThreadId(
+      await this.enrichInboundMessage(this.parseMessage(payload))
     );
     this.requireChat().processMessage(this, message.threadId, message, options);
 
@@ -279,9 +284,8 @@ export class ChatworkAdapter
       return {
         id: raw.message_id,
         raw,
-        threadId: this.encodeThreadId({
-          messageId: raw.message_id,
-          roomId: decoded.roomId,
+        threadId: this.encodeReplyThreadId({
+          decoded,
         }),
       };
     }
@@ -307,6 +311,7 @@ export class ChatworkAdapter
       });
 
       lastPostReference = await this.resolveUploadedFilePostReference({
+        decoded,
         fileId: upload.file_id,
         roomId: decoded.roomId,
       });
@@ -323,7 +328,21 @@ export class ChatworkAdapter
     };
   }
 
+  private encodeReplyThreadId(args: { decoded: ChatworkThreadId }): string {
+    if (!args.decoded.messageId) {
+      return this.encodeThreadId({
+        roomId: args.decoded.roomId,
+      });
+    }
+    return this.encodeThreadId({
+      messageId: args.decoded.messageId,
+      replyToAccountId: args.decoded.replyToAccountId,
+      roomId: args.decoded.roomId,
+    });
+  }
+
   private async resolveUploadedFilePostReference(args: {
+    decoded: ChatworkThreadId;
     fileId: number;
     roomId: number;
   }): Promise<ChatworkPostReference> {
@@ -334,9 +353,8 @@ export class ChatworkAdapter
       });
       return {
         id: fileInfo.message_id,
-        threadId: this.encodeThreadId({
-          messageId: fileInfo.message_id,
-          roomId: args.roomId,
+        threadId: this.encodeReplyThreadId({
+          decoded: args.decoded,
         }),
       };
     } catch (error) {
@@ -350,7 +368,9 @@ export class ChatworkAdapter
       );
       return {
         id: `file:${args.fileId}`,
-        threadId: this.encodeThreadId({ roomId: args.roomId }),
+        threadId: this.encodeReplyThreadId({
+          decoded: args.decoded,
+        }),
       };
     }
   }
@@ -481,6 +501,56 @@ export class ChatworkAdapter
       "Chatwork reactions are not supported",
       "removeReaction"
     );
+  }
+
+  private async normalizeInboundThreadId<T>(
+    message: Message<T>
+  ): Promise<Message<T>> {
+    const decoded = this.decodeThreadId(message.threadId);
+    if (!decoded.messageId) {
+      return message;
+    }
+
+    const replyNotation = parseReplyNotation(message.text);
+    if (!replyNotation || replyNotation.roomId !== decoded.roomId) {
+      return message;
+    }
+
+    try {
+      const roomMessages = await this.client.getRoomMessages(decoded.roomId);
+      const rootMessageId = resolveReplyChainRootMessageId({
+        messageId: decoded.messageId,
+        messageText: message.text,
+        messagesById: indexChatworkRoomMessagesById({ messages: roomMessages }),
+        roomId: decoded.roomId,
+      });
+      const stableThreadId = this.encodeThreadId({
+        messageId: rootMessageId,
+        replyToAccountId: decoded.replyToAccountId,
+        roomId: decoded.roomId,
+      });
+      if (stableThreadId === message.threadId) {
+        return message;
+      }
+
+      return new Message<T>({
+        attachments: message.attachments,
+        author: message.author,
+        formatted: message.formatted,
+        id: message.id,
+        isMention: message.isMention,
+        metadata: message.metadata,
+        raw: message.raw,
+        text: message.text,
+        threadId: stableThreadId,
+      });
+    } catch (error) {
+      this.logger.warn(
+        "Failed to normalize Chatwork inbound thread id; using message-scoped id",
+        error
+      );
+      return message;
+    }
   }
 
   private async enrichInboundMessage<T>(

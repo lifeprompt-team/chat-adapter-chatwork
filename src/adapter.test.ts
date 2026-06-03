@@ -174,6 +174,77 @@ describe("ChatworkAdapter", () => {
     expect(processMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("normalizes inbound thread id to the reply-chain root for follow-up messages", async () => {
+    const processMessage = vi.fn();
+    const fetch = createFetchMock({
+      "/contacts": () =>
+        new Response(
+          JSON.stringify([{ account_id: 123, name: "Alice", room_id: 456 }]),
+          { status: 200 }
+        ),
+      "/rooms/456/messages?force=1": () =>
+        new Response(
+          JSON.stringify([
+            {
+              account: { account_id: 1, name: "Alice" },
+              body: "[To:999] hello",
+              message_id: "100",
+              send_time: 1,
+              update_time: 0,
+            },
+            {
+              account: { account_id: 2, name: "Bob" },
+              body: "[rp aid=1 to=456-100] bot reply",
+              message_id: "200",
+              send_time: 2,
+              update_time: 0,
+            },
+          ]),
+          { status: 200 }
+        ),
+    });
+    const adapter = createAdapter({ fetch });
+    await adapter.initialize(createChat(processMessage));
+
+    const body = JSON.stringify({
+      webhook_event: {
+        account_id: 123,
+        body: "[rp aid=2 to=456-200] follow-up",
+        message_id: "300",
+        room_id: 456,
+        send_time: 1498028125,
+        update_time: 0,
+      },
+      webhook_event_time: 1498028130,
+      webhook_event_type: "message_created",
+      webhook_setting_id: "setting-1",
+    });
+
+    const response = await adapter.handleWebhook(
+      new Request("https://example.com/webhook", {
+        body,
+        headers: {
+          "x-chatworkwebhooksignature": createChatworkSignature(
+            body,
+            Buffer.from("webhook-secret").toString("base64")
+          ),
+        },
+        method: "POST",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(processMessage).toHaveBeenCalledTimes(1);
+    const [, threadId] = processMessage.mock.calls[0] ?? [];
+    expect(threadId).toBe(
+      adapter.encodeThreadId({
+        messageId: "100",
+        replyToAccountId: 123,
+        roomId: 456,
+      })
+    );
+  });
+
   it("processes direct room message_created events", async () => {
     const processMessage = vi.fn();
     const fetch = createFetchMock({
@@ -362,6 +433,26 @@ describe("ChatworkAdapter", () => {
     ).rejects.toMatchObject({
       message: expect.stringContaining("Could not resolve Chatwork reply target"),
     });
+  });
+
+  it("postMessage の threadId は返信先アンカーを維持する", async () => {
+    const fetch = createFetchMock({
+      "/rooms/456/messages": () =>
+        new Response(JSON.stringify({ message_id: "bot-1" }), { status: 200 }),
+    });
+    const adapter = createAdapter({ fetch, botAccountId: 999 });
+    const inboundThreadId = adapter.encodeThreadId({
+      messageId: "user-1",
+      replyToAccountId: 123,
+      roomId: 456,
+    });
+
+    const result = await adapter.postMessage(inboundThreadId, {
+      markdown: "hello",
+    });
+
+    expect(result.id).toBe("bot-1");
+    expect(result.threadId).toBe(inboundThreadId);
   });
 
   it("rejects outbound files over 5MB", async () => {

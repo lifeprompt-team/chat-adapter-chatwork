@@ -26,6 +26,9 @@ export {
   collectReplyChainFromMessages,
   DEFAULT_REPLY_CHAIN_MAX_DEPTH,
   indexChatworkRoomMessagesById,
+  readMessageIdBeforeBySendTime,
+  readReplyParentMessageId,
+  resolveReplyChainRootMessageId,
 } from "./reply-chain";
 export {
   createChatworkSignature,
