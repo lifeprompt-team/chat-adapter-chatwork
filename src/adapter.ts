@@ -55,6 +55,8 @@ import { verifyChatworkWebhook, type VerifiedChatworkWebhook } from "./webhook";
 const MAX_BODY_LENGTH = 65535;
 const CONTACTS_CACHE_TTL_MS = 60_000;
 const ROOM_MEMBERS_CACHE_TTL_MS = 60_000;
+const ROOM_MESSAGES_CACHE_TTL_MS = 60_000;
+const ROOM_TYPE_CACHE_TTL_MS = 10 * 60_000;
 const UNKNOWN_ROOM_TYPE = "unknown";
 
 type ChatworkPostReference = {
@@ -76,11 +78,18 @@ export class ChatworkAdapter
     number,
     { expiresAt: number; members: ChatworkRoomMember[] }
   >();
+  private readonly roomMessagesCacheById = new Map<
+    number,
+    { expiresAt: number; messages: ChatworkRoomMessage[] }
+  >();
   private readonly client: ChatworkClient;
   private readonly config: ChatworkAdapterConfig;
   private logger: Logger;
   private readonly converter = new ChatworkFormatConverter();
-  private readonly roomTypeById = new Map<number, string>();
+  private readonly roomTypeById = new Map<
+    number,
+    { expiresAt: number; type: string }
+  >();
 
   constructor(config: ChatworkAdapterConfig) {
     validateConfig(config);
@@ -126,7 +135,7 @@ export class ChatworkAdapter
    */
   isDM(threadId: string): boolean {
     const decoded = this.decodeThreadId(threadId);
-    const cachedType = this.roomTypeById.get(decoded.roomId);
+    const cachedType = this.readCachedRoomType(decoded.roomId);
     if (cachedType !== undefined) {
       return cachedType === "direct";
     }
@@ -439,7 +448,7 @@ export class ChatworkAdapter
     _options?: FetchOptions
   ): Promise<FetchResult<ChatworkRoomMessage>> {
     const decoded = this.decodeThreadId(threadId);
-    const roomMessages = await this.client.getRoomMessages(decoded.roomId);
+    const roomMessages = await this.getRoomMessagesCached(decoded.roomId);
     const selectedMessages =
       decoded.messageId === undefined
         ? roomMessages
@@ -523,7 +532,7 @@ export class ChatworkAdapter
     }
 
     try {
-      const roomMessages = await this.client.getRoomMessages(decoded.roomId);
+      const roomMessages = await this.getRoomMessagesCached(decoded.roomId);
       const rootMessageId = resolveReplyChainRootMessageId({
         messageId: decoded.messageId,
         messageText: message.text,
@@ -640,7 +649,35 @@ export class ChatworkAdapter
   }
 
   private cacheRoomType(args: { roomId: number; type?: string }): void {
-    this.roomTypeById.set(args.roomId, args.type ?? UNKNOWN_ROOM_TYPE);
+    this.roomTypeById.set(args.roomId, {
+      expiresAt: Date.now() + ROOM_TYPE_CACHE_TTL_MS,
+      type: args.type ?? UNKNOWN_ROOM_TYPE,
+    });
+  }
+
+  private readCachedRoomType(roomId: number): string | undefined {
+    const cached = this.roomTypeById.get(roomId);
+    if (!cached || Date.now() >= cached.expiresAt) {
+      this.roomTypeById.delete(roomId);
+      return undefined;
+    }
+    return cached.type;
+  }
+
+  private async getRoomMessagesCached(
+    roomId: number
+  ): Promise<ChatworkRoomMessage[]> {
+    const cached = this.roomMessagesCacheById.get(roomId);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.messages;
+    }
+
+    const messages = await this.client.getRoomMessages(roomId);
+    this.roomMessagesCacheById.set(roomId, {
+      expiresAt: Date.now() + ROOM_MESSAGES_CACHE_TTL_MS,
+      messages,
+    });
+    return messages;
   }
 
   private async getContactsCached(): Promise<ChatworkContact[]> {
@@ -670,7 +707,7 @@ export class ChatworkAdapter
   }
 
   private async isDirectRoom(roomId: number): Promise<boolean> {
-    const cachedType = this.roomTypeById.get(roomId);
+    const cachedType = this.readCachedRoomType(roomId);
     if (cachedType !== undefined) {
       return cachedType === "direct";
     }
